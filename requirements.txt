@@ -1,0 +1,8 @@
+torch>=2.0
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+openpyxl
+xgboost
