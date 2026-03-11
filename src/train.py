@@ -163,15 +163,14 @@ def cross_validate(full_data, n_features, device, scenario_name, class_weights=N
         X_fold_train = fold_scaler.fit_transform(X_full[train_idx])
         X_fold_val   = fold_scaler.transform(X_full[val_idx])
         
-        train_fold_ds = DNAProfileDataset(
-            torch.tensor(X_fold_train, dtype=torch.float32), 
-            torch.tensor(y_full[train_idx], dtype=torch.long), 
-            fit_scaler=False
+        # Build datasets directly from pre-scaled numpy arrays
+        train_fold_ds = torch.utils.data.TensorDataset(
+            torch.tensor(X_fold_train, dtype=torch.float32),
+            torch.tensor(y_full[train_idx] - 1, dtype=torch.long),   # NOC 1-5 → 0-4
         )
-        val_fold_ds = DNAProfileDataset(
-            torch.tensor(X_fold_val, dtype=torch.float32), 
-            torch.tensor(y_full[val_idx], dtype=torch.long), 
-            fit_scaler=False
+        val_fold_ds = torch.utils.data.TensorDataset(
+            torch.tensor(X_fold_val, dtype=torch.float32),
+            torch.tensor(y_full[val_idx] - 1, dtype=torch.long),
         )
         
         train_loader = DataLoader(train_fold_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
