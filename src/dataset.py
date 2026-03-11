@@ -17,16 +17,21 @@ class DNAProfileDataset(Dataset):
     Features are normalized to [0, 1] using MinMaxScaler.
     """
     
-    def __init__(self, features, labels, scaler=None, fit_scaler=True):
-        if scaler is None:
-            self.scaler = MinMaxScaler()
+    def __init__(self, features, labels, scaler=None, fit_scaler=True, skip_normalization=False):
+        if skip_normalization:
+            # Data already normalized, skip scaler operations
+            self.scaler = scaler  # Keep reference if provided
+            self.features = features
         else:
-            self.scaler = scaler
-        
-        if fit_scaler:
-            self.features = self.scaler.fit_transform(features)
-        else:
-            self.features = self.scaler.transform(features)
+            if scaler is None:
+                self.scaler = MinMaxScaler()
+            else:
+                self.scaler = scaler
+            
+            if fit_scaler:
+                self.features = self.scaler.fit_transform(features)
+            else:
+                self.features = self.scaler.transform(features)
         
         self.features = torch.FloatTensor(self.features)
         self.labels = torch.LongTensor(labels - 1)  # NOC 1-5 → 0-4
