@@ -21,7 +21,10 @@ class DNAProfileDataset(Dataset):
         if skip_normalization:
             # Data already normalized, skip scaler operations
             self.scaler = scaler  # Keep reference if provided
-            self.features = features
+            if isinstance(features, torch.Tensor):
+                self.features = features.float()
+            else:
+                self.features = torch.FloatTensor(features)
         else:
             if scaler is None:
                 self.scaler = MinMaxScaler()
@@ -32,8 +35,9 @@ class DNAProfileDataset(Dataset):
                 self.features = self.scaler.fit_transform(features)
             else:
                 self.features = self.scaler.transform(features)
-        
-        self.features = torch.FloatTensor(self.features)
+            
+            self.features = torch.FloatTensor(self.features)
+            
         self.labels = torch.LongTensor(labels - 1)  # NOC 1-5 → 0-4
     
     def __len__(self):
