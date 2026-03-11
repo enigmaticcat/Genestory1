@@ -220,59 +220,48 @@ def step5_remove_markers(df, markers_to_keep):
 def step5b_pad_missing_markers(df, all_markers):
     """
     Step 5b: Pad missing markers for each profile with zero rows.
-
-    When a GF29 profile lacks 'Penta D' (PP16HS-only marker), adds a row
-    with Marker='Penta D', all allele/size/height = 0, Missing_Marker = 1.
-
-    After this step every profile has exactly len(all_markers) rows.
-    Missing_Marker = 0: real marker detected by the kit
-    Missing_Marker = 1: padded (kit does not measure this locus)
+    Vectorized version for better performance.
     """
-    df = df.copy()
-    df['Missing_Marker'] = 0
+    # 1. Create a complete MultiIndex of (Sample File, Marker)
+    sample_files = df['Sample File'].unique()
+    all_markers = sorted(list(all_markers))
+    
+    full_index = pd.MultiIndex.from_product(
+        [sample_files, all_markers], 
+        names=['Sample File', 'Marker']
+    )
+    
+    # 2. Reindex existing df to include all (Sample File, Marker) pairs
+    # First set index to (Sample File, Marker)
+    df = df.set_index(['Sample File', 'Marker'])
+    
+    # Check for duplicates before reindexing
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep='first')]
 
-    all_markers_set = set(all_markers)
-    new_rows = []
-
-    # Columns to zero-out in padded rows
-    zero_cols = []
-    for i in range(1, MAX_ALLELES + 1):
-        for prefix in ['Allele', 'Size', 'Height']:
-            col = f'{prefix} {i}'
-            if col in df.columns:
-                zero_cols.append(col)
-        for col in [f'OL_ind_{i}',
-                    f'Missing_Allele_{i}', f'Missing_Size_{i}', f'Missing_Height_{i}']:
-            if col in df.columns:
-                zero_cols.append(col)
-
-    for sample_file, group in df.groupby('Sample File', sort=False):
-        existing = set(group['Marker'].unique())
-        missing = all_markers_set - existing
-        if not missing:
-            continue
-
-        # Use first row as template (carries Sample File, NOC, multiplex, injection_time)
-        template = group.iloc[0].copy()
-        for marker in missing:
-            pad = template.copy()
-            pad['Marker'] = marker
-            pad['Dye'] = -1   # no dye for padded marker
-            for col in zero_cols:
-                pad[col] = 0
-            pad['Missing_Marker'] = 1
-            new_rows.append(pad)
-
-    if new_rows:
-        pad_df = pd.DataFrame(new_rows)
-        df = pd.concat([df, pad_df], ignore_index=True)
-
-    df = df.sort_values(['Sample File', 'Marker']).reset_index(drop=True)
-    n_profiles = df['Sample File'].nunique()
-    avg_pad = len(new_rows) / n_profiles if n_profiles else 0
-    print(f"  Step 5b: Added {len(new_rows)} padded rows "
-          f"({avg_pad:.1f} avg/profile). All profiles now have {len(all_markers)} markers.")
-    return df
+    df_padded = df.reindex(full_index)
+    
+    # 3. Mark which rows are new (padded)
+    # Use 'NOC' (should be constant per profile) to detect padded rows
+    df_padded['Missing_Marker'] = df_padded['NOC'].isna().astype(int)
+    
+    # 4. Forward/Backward fill metadata (constant per Sample File)
+    metadata_cols = ['NOC', 'injection_time', 'multiplex', 'folder_name', 'Sample Name']
+    for col in metadata_cols:
+        if col in df_padded.columns:
+            df_padded[col] = df_padded.groupby(level=0)[col].ffill().bfill()
+    
+    # 5. Fill numeric features with 0
+    # Everything else (Allele, Height, Size, OL_ind, Missing_*) should be 0 for padded markers
+    df_padded = df_padded.fillna(0)
+    
+    # 6. Reset index and return
+    df_padded = df_padded.reset_index()
+    
+    print(f"  Step 5b: Added {int(df_padded['Missing_Marker'].sum())} padded rows. "
+          f"Total rows: {len(df_padded)}")
+    
+    return df_padded
 
 
 def step6_encode_dye(df):

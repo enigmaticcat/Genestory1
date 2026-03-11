@@ -84,12 +84,13 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
 
 
 def evaluate(model, dataloader, criterion, device):
-    """Evaluate model. Returns loss, accuracy, all predictions and labels."""
+    """Evaluate model. Returns loss, accuracy, all predictions, labels, and probabilities."""
     model.eval()
     total_loss = 0
     total_samples = 0
     all_preds = []
     all_labels = []
+    all_probs = []
     
     with torch.no_grad():
         for features, labels in dataloader:
@@ -99,18 +100,23 @@ def evaluate(model, dataloader, criterion, device):
             loss = criterion(outputs, labels)
             
             total_loss += loss.item() * features.size(0)
+            
+            # Predict
+            probs = torch.softmax(outputs, dim=1)
             _, predicted = torch.max(outputs, 1)
             
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
             total_samples += features.size(0)
     
     avg_loss = total_loss / total_samples
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
+    all_probs = np.array(all_probs)
     accuracy = (all_preds == all_labels).mean()
     
-    return avg_loss, accuracy, all_preds, all_labels
+    return avg_loss, accuracy, all_preds, all_labels, all_probs
 
 
 def cross_validate(full_data, n_features, device, scenario_name, class_weights=None):
@@ -180,7 +186,7 @@ def cross_validate(full_data, n_features, device, scenario_name, class_weights=N
 
         for epoch in range(EPOCHS):
             train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-            val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc, _, _, _ = evaluate(model, val_loader, criterion, device)
 
             # Early stopping
             if val_acc > best_val_acc:
@@ -249,7 +255,7 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
 
     for epoch in range(EPOCHS):
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        test_loss, test_acc, _, _ = evaluate(model, test_loader, criterion, device)
+        test_loss, test_acc, _, _, _ = evaluate(model, test_loader, criterion, device)
 
         # Save best model & early stopping
         if test_acc > best_test_acc:
@@ -276,12 +282,15 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     model.load_state_dict(torch.load(model_path, weights_only=True))
     
     # Final evaluation on train and test
-    _, train_acc, train_preds, train_labels = evaluate(model, train_loader, criterion, device)
-    _, test_acc, test_preds, test_labels = evaluate(model, test_loader, criterion, device)
+    _, train_acc, train_preds, train_labels, train_probs = evaluate(model, train_loader, criterion, device)
+    _, test_acc, test_preds, test_labels, test_probs = evaluate(model, test_loader, criterion, device)
     
     # Compute detailed metrics
     train_metrics = compute_metrics(train_labels, train_preds)
     test_metrics = compute_metrics(test_labels, test_preds)
+    
+    train_metrics['probs'] = train_probs
+    test_metrics['probs']  = test_probs
     
     print(f"\n--- Training Set Metrics ---")
     print_metrics(train_metrics)

@@ -196,6 +196,38 @@ def prepare_profile_datasets(df, train_ratio=0.9, random_seed=42):
     if len(valid) < len(mpp):
         print(f"  Removed {len(mpp) - len(valid)} profiles with inconsistent markers")
         df_sorted = df_sorted[df_sorted[profile_col].isin(valid)].reset_index(drop=True)
+
+    # --- NEW: BALANCING Class 1 BEFORE feature extraction ---
+    unique_profiles = df_sorted.drop_duplicates(profile_col)[[profile_col, 'NOC']]
+    if 'injection_time' in df_sorted.columns:
+        unique_profiles['injection_time'] = df_sorted.groupby(profile_col)['injection_time'].transform('first')
+    
+    noc_counts = unique_profiles['NOC'].value_counts()
+    
+    # Target: average of other classes (NOC 2-5)
+    others = noc_counts[noc_counts.index > 1]
+    target_n = int(others.mean()) if not others.empty else 1200
+    
+    if noc_counts.get(1, 0) > target_n:
+        print(f"  Downsampling NOC=1 from {int(noc_counts[1])} to {target_n} profiles...")
+        noc1_df = unique_profiles[unique_profiles['NOC'] == 1]
+        
+        # Stratified sample if injection_time available
+        if 'injection_time' in noc1_df.columns:
+            selected_noc1 = noc1_df.groupby('injection_time', group_keys=False).apply(
+                lambda x: x.sample(n=min(len(x), int(target_n / noc1_df['injection_time'].nunique())), 
+                                 random_state=random_seed)
+            ).index
+        else:
+            selected_noc1 = noc1_df.sample(n=target_n, random_state=random_seed).index
+            
+        remaining_profiles = unique_profiles[unique_profiles['NOC'] > 1].index
+        balanced_indices = remaining_profiles.union(selected_noc1)
+        balanced_sample_files = unique_profiles.loc[balanced_indices, profile_col].values
+        
+        df_sorted = df_sorted[df_sorted[profile_col].isin(balanced_sample_files)].reset_index(drop=True)
+        print(f"  Balanced dataset: {df_sorted[profile_col].nunique()} profiles")
+    # --------------------------------------------------------
     
     # Column groups
     height_cols = [f'Height {i}' for i in range(1, 11) if f'Height {i}' in df.columns]

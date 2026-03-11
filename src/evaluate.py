@@ -7,10 +7,12 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report,
+    confusion_matrix, classification_report, roc_curve, auc
 )
+from sklearn.preprocessing import label_binarize
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -186,8 +188,328 @@ def plot_accuracy_comparison(results_dict, save_path):
     print(f"  Saved: {save_path}")
 
 
-def generate_all_plots(train_metrics, test_metrics, scenario_name):
-    """Generate all plots for a scenario."""
+def plot_roc_curves(model_probs, y_true, title, save_path):
+    """
+    Plot ROC curves for multiple models on the same plot (One-vs-Rest macro average).
+    
+    Args:
+        model_probs: dict {model_name: proba_array}
+        y_true: true labels (0-4)
+    """
+    from sklearn.metrics import roc_curve, auc
+    from sklearn.preprocessing import label_binarize
+    import numpy as np
+    
+    n_classes = NUM_CLASSES
+    y_true_bin = label_binarize(y_true, classes=np.arange(n_classes))
+    
+    plt.figure(figsize=(10, 8))
+    
+    colors = ['#2196F3', '#4CAF50', '#FF9800', '#F44336', '#9C27B0']
+    
+    for i, (name, probs) in enumerate(model_probs.items()):
+        if probs is None:
+            continue
+            
+        # Compute ROC curve and ROC area for each class
+        fpr = dict()
+        tpr = dict()
+        
+        for j in range(n_classes):
+            fpr[j], tpr[j], _ = roc_curve(y_true_bin[:, j], probs[:, j])
+            
+        # Compute macro-average ROC curve and ROC area
+        all_fpr = np.unique(np.concatenate([fpr[j] for j in range(n_classes)]))
+        
+        mean_tpr = np.zeros_like(all_fpr)
+        for j in range(n_classes):
+            mean_tpr += np.interp(all_fpr, fpr[j], tpr[j])
+            
+        mean_tpr /= n_classes
+        macro_auc = auc(all_fpr, mean_tpr)
+        
+        plt.plot(all_fpr, mean_tpr,
+                 label=f'{name} (auc = {macro_auc:.3f})',
+                 color=colors[i % len(colors)], linewidth=2)
+                 
+    plt.plot([0, 1], [0, 1], 'k--', lw=1)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title(title, fontsize=14)
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
+def plot_dataset_distribution(df, title, save_path):
+    """
+    Plot NOC distribution of the dataset.
+    """
+    plt.figure(figsize=(10, 6))
+    
+    if 'Sample File' in df.columns:
+        counts = df.groupby('Sample File')['NOC'].first().value_counts().sort_index()
+    else:
+        counts = df['NOC'].value_counts().sort_index()
+        
+    counts.index = [f'{int(i)}-Person' for i in counts.index]
+    
+    bars = plt.bar(counts.index, counts.values, color='#4CAF50', alpha=0.8)
+    
+    plt.xlabel('Class (Number of Contributors)', fontsize=12)
+    plt.ylabel('Number of Profiles', fontsize=12)
+    plt.title(title, fontsize=14)
+    
+    for bar in bars:
+        height = bar.get_height()
+        plt.annotate(f'{int(height)}',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=10)
+                    
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
+def save_auc_metrics_to_csv(model_probs, y_true, scenario_name, tree_results=None, test_metrics=None):
+    """
+    Save AUC metrics của tất cả models vào CSV file.
+    
+    Args:
+        model_probs: dict {model_name: proba_array}
+        y_true: true labels (0-4)
+        scenario_name: tên scenario
+        tree_results: kết quả từ tree models 
+        test_metrics: kết quả từ MLP model
+    """
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import label_binarize
+    
+    n_classes = NUM_CLASSES
+    y_true_bin = label_binarize(y_true, classes=np.arange(n_classes))
+    
+    metrics_data = []
+    
+    for model_name, probs in model_probs.items():
+        if probs is None:
+            continue
+            
+        # Compute macro AUC
+        try:
+            macro_auc = roc_auc_score(y_true_bin, probs, average='macro', multi_class='ovr')
+        except:
+            macro_auc = 0.0
+            
+        # Compute per-class AUC
+        per_class_auc = []
+        for i in range(n_classes):
+            try:
+                class_auc = roc_auc_score(y_true_bin[:, i], probs[:, i])
+                per_class_auc.append(class_auc)
+            except:
+                per_class_auc.append(0.0)
+                
+        # Get accuracy from results
+        accuracy = 0.0
+        if model_name == 'MLP' and test_metrics:
+            accuracy = test_metrics['accuracy']
+        elif tree_results:
+            for tree_name, tree_result in tree_results.items():
+                if tree_name.replace('_', ' ') in model_name or model_name.replace(' ', '_') in tree_name:
+                    accuracy = tree_result['test_acc']
+                    break
+        
+        metrics_data.append({
+            'Scenario': scenario_name,
+            'Model': model_name,
+            'Macro_AUC': macro_auc,
+            'Accuracy': accuracy,
+            'AUC_1Person': per_class_auc[0] if len(per_class_auc) > 0 else 0.0,
+            'AUC_2Person': per_class_auc[1] if len(per_class_auc) > 1 else 0.0,
+            'AUC_3Person': per_class_auc[2] if len(per_class_auc) > 2 else 0.0,
+            'AUC_4Person': per_class_auc[3] if len(per_class_auc) > 3 else 0.0,
+            'AUC_5Person': per_class_auc[4] if len(per_class_auc) > 4 else 0.0,
+        })
+    
+    # Save to CSV
+    df_metrics = pd.DataFrame(metrics_data)
+    csv_path = os.path.join(RESULTS_DIR, f'{scenario_name}_auc_metrics.csv')
+    df_metrics.to_csv(csv_path, index=False)
+    print(f"  Saved AUC metrics: {csv_path}")
+    
+    return df_metrics
+
+
+def plot_three_model_roc_comparison(model_probs, y_true, scenario_name, tree_results=None):
+    """
+    Plot ROC curves comparison cho 3 models: MLP, Random Forest, XGBoost.
+    
+    Args:
+        model_probs: dict {model_name: proba_array}
+        y_true: true labels (0-4) 
+        scenario_name: tên scenario
+        tree_results: kết quả từ tree models để lấy accuracy
+    """
+    n_classes = NUM_CLASSES
+    y_true_bin = label_binarize(y_true, classes=np.arange(n_classes))
+    
+    plt.figure(figsize=(12, 8))
+    
+    colors = {'MLP': '#2196F3', 'Random Forest': '#4CAF50', 'RandomForest': '#4CAF50', 
+              'XGBoost': '#FF9800', 'GradientBoosting': '#FF5722'}
+    
+    auc_data = []
+    
+    for model_name, probs in model_probs.items():
+        if probs is None:
+            continue
+            
+        # Compute ROC curve and ROC area for each class
+        fpr = dict()
+        tpr = dict()
+        roc_auc = dict()
+        
+        for i in range(n_classes):
+            fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], probs[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
+            
+        # Compute macro-average ROC curve and ROC area
+        all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
+        
+        mean_tpr = np.zeros_like(all_fpr)
+        for i in range(n_classes):
+            mean_tpr += np.interp(all_fpr, fpr[i], tpr[i])
+            
+        mean_tpr /= n_classes
+        macro_auc = auc(all_fpr, mean_tpr)
+        
+        # Get accuracy for label
+        accuracy = "N/A"
+        if tree_results:
+            for tree_name, tree_result in tree_results.items():
+                if tree_name.replace('_', ' ') in model_name or model_name.replace(' ', '_') in tree_name:
+                    accuracy = f"{tree_result['test_acc']:.3f}"
+                    break
+        
+        color = colors.get(model_name, '#666666')
+        plt.plot(all_fpr, mean_tpr,
+                 label=f'{model_name} (AUC={macro_auc:.3f}, Acc={accuracy})',
+                 color=color, linewidth=3)
+                 
+        auc_data.append({'Model': model_name, 'AUC': macro_auc, 'Accuracy': accuracy})
+                 
+    plt.plot([0, 1], [0, 1], 'k--', lw=2, alpha=0.6)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=14, fontweight='bold')
+    plt.ylabel('True Positive Rate', fontsize=14, fontweight='bold')
+    plt.title(f'TAWSEEM: ROC Curves Comparison - {scenario_name.replace("_", " ").title()}', 
+              fontsize=16, fontweight='bold')
+    plt.legend(loc="lower right", fontsize=12)
+    plt.grid(alpha=0.3)
+    
+    # Add text box with AUC summary
+    textstr = 'Model Performance:\n'
+    for data in auc_data:
+        textstr += f'{data["Model"]}: AUC={data["AUC"]:.3f}\n'
+    
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, fontsize=10,
+             verticalalignment='top', bbox=props)
+    
+    plt.tight_layout()
+    save_path = os.path.join(RESULTS_DIR, f'{scenario_name}_three_model_roc_curves.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved 3-Model ROC comparison: {save_path}")
+    
+    return save_path
+
+
+def generate_comprehensive_evaluation(train_metrics, test_metrics, scenario_name, 
+                                    df=None, model_probs=None, tree_results=None):
+    """
+    Generate comprehensive evaluation bao gồm tất cả plots và metrics files.
+    
+    Args:
+        train_metrics: training metrics
+        test_metrics: test metrics 
+        scenario_name: tên scenario
+        df: dataframe cho distribution plot
+        model_probs: dict {model_name: proba_array}
+        tree_results: kết quả từ tree models
+    """
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    
+    scenario_display = scenario_name.replace('_', ' ').title()
+    
+    print(f"\n{'='*60}")
+    print(f"Generating comprehensive evaluation for {scenario_display}...")
+    print(f"{'='*60}")
+    
+    # 1. Dataset Distribution Plot
+    if df is not None:
+        print("\n[1/5] Creating dataset distribution plot...")
+        plot_dataset_distribution(
+            df,
+            f'TAWSEEM Dataset Distribution - {scenario_display}',
+            os.path.join(RESULTS_DIR, f'{scenario_name}_dataset_distribution.png')
+        )
+    
+    # 2. Three-Model ROC Curves Comparison
+    if model_probs is not None:
+        print("\n[2/5] Creating 3-model ROC curves comparison...")
+        plot_three_model_roc_comparison(
+            model_probs, test_metrics['y_true'], scenario_name, tree_results
+        )
+        
+        # 3. Save AUC Metrics to CSV
+        print("\n[3/5] Saving AUC metrics to CSV...")
+        save_auc_metrics_to_csv(
+            model_probs, test_metrics['y_true'], scenario_name, tree_results, test_metrics
+        )
+    
+    # 4. Original ROC curves (individual)
+    if model_probs is not None:
+        print("\n[4/5] Creating individual ROC curves...")
+        plot_roc_curves(
+            model_probs,
+            test_metrics['y_true'],
+            f'TAWSEEM ROC Curves - Individual Models ({scenario_display})',
+            os.path.join(RESULTS_DIR, f'{scenario_name}_roc_individual.png')
+        )
+    
+    # 5. Confusion Matrix và Performance Metrics
+    print("\n[5/5] Creating confusion matrices và performance plots...")
+    
+    # Test confusion matrix
+    plot_confusion_matrix(
+        test_metrics,
+        f'TAWSEEM Testing Confusion Matrix - {scenario_display}',
+        os.path.join(RESULTS_DIR, f'{scenario_name}_confusion_matrix_test.png')
+    )
+    
+    # Performance metrics
+    plot_precision_recall_f1(
+        test_metrics,
+        f'TAWSEEM Performance Metrics - {scenario_display}',
+        os.path.join(RESULTS_DIR, f'{scenario_name}_performance_metrics.png')
+    )
+    
+    print(f"\n✅ Comprehensive evaluation completed for {scenario_display}!")
+    print(f"   All files saved in: {RESULTS_DIR}")
+
+
+def generate_all_plots(train_metrics, test_metrics, scenario_name, df=None, model_probs=None):
+    """Generate all plots for a scenario (compatibility function)."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
     
     scenario_display = scenario_name.replace('_', ' ').title()
@@ -224,3 +546,20 @@ def generate_all_plots(train_metrics, test_metrics, scenario_name):
         f'TAWSEEM Prediction Errors ({scenario_display})',
         os.path.join(RESULTS_DIR, f'{scenario_name}_errors.png')
     )
+    
+    # Dataset distribution
+    if df is not None:
+        plot_dataset_distribution(
+            df,
+            f'TAWSEEM Dataset Distribution ({scenario_display})',
+            os.path.join(RESULTS_DIR, f'{scenario_name}_distribution.png')
+        )
+        
+    # ROC Curves
+    if model_probs is not None:
+        plot_roc_curves(
+            model_probs,
+            test_metrics['y_true'],
+            f'TAWSEEM ROC Curves - Comparison ({scenario_display})',
+            os.path.join(RESULTS_DIR, f'{scenario_name}_roc_comparison.png')
+        )

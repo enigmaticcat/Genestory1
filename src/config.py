@@ -142,6 +142,6 @@ EARLY_STOPPING_PATIENCE = 30  # stop early if val accuracy stagnates for N epoch
 # ============================================================
 # TRAINING PARAMETERS
 # ============================================================
-TRAIN_RATIO = 0.7   # 70% train, 30% test
+TRAIN_RATIO = 0.9   # 90% train, 10% test
 NUM_CV_FOLDS = 5     # 5-fold cross-validation
 RANDOM_SEED = 42

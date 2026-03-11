@@ -143,8 +143,13 @@ def train_tree_models(train_dataset, test_dataset, groups_train, full_data, scen
         X_train_scaled = best_scaler.transform(X_train)
         X_test_scaled = best_scaler.transform(X_test)
         
+        
         train_preds = best_model.predict(X_train_scaled)
         test_preds = best_model.predict(X_test_scaled)
+        
+        test_preds_proba = None
+        if hasattr(best_model, 'predict_proba'):
+            test_preds_proba = best_model.predict_proba(X_test_scaled)
         
         train_acc = accuracy_score(y_train, train_preds)
         test_acc = accuracy_score(y_test, test_preds)
@@ -171,8 +176,11 @@ def train_tree_models(train_dataset, test_dataset, groups_train, full_data, scen
             'cv_std': cv_scores.std(),
             'test_acc': test_acc,
             'train_acc': train_acc,
-            'model': model,
-            'time': train_time,
+            'model': best_model,
+            'scaler': best_scaler,
+            'time': start_time,
+            'test_preds': test_preds,
+            'test_preds_proba': test_preds_proba
         }
     
     return results

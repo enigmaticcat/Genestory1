@@ -16,7 +16,7 @@ from src.data_preprocessing import preprocess_scenario
 from src.dataset import prepare_datasets, prepare_profile_datasets
 from src.train import cross_validate, train_final_model
 from src.tree_models import train_tree_models
-from src.evaluate import generate_all_plots, plot_accuracy_comparison
+from src.evaluate import generate_all_plots, plot_accuracy_comparison, generate_comprehensive_evaluation
 
 
 def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
@@ -37,7 +37,7 @@ def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
     
     # --- Step 2: Prepare PyTorch datasets (profile-level) ---
     print(f"\nPreparing PyTorch datasets (profile-level)...")
-    train_dataset, test_dataset, scaler, train_profile_ids, cnn_data, group_data = prepare_profile_datasets(
+    train_dataset, test_dataset, scaler, train_profile_ids, cnn_data, group_data, full_data = prepare_profile_datasets(
         df, train_ratio=TRAIN_RATIO, random_seed=RANDOM_SEED
     )
     
@@ -68,8 +68,18 @@ def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
     # --- Step 6: Train tree-based models (RF + XGBoost) ---
     tree_results = train_tree_models(train_dataset, test_dataset, groups_train, full_data, scenario_name)
     
-    # --- Step 7: Generate plots ---
-    generate_all_plots(train_metrics, test_metrics, scenario_name)
+    # --- Step 7: Generate comprehensive evaluation ---
+    model_probs = {
+        'MLP': test_metrics.get('probs'),
+        'Random Forest': tree_results.get('RandomForest', {}).get('test_preds_proba'),
+        'XGBoost': tree_results.get('XGBoost', {}).get('test_preds_proba')
+    }
+    
+    # Use comprehensive evaluation để tạo đầy đủ plots và metrics
+    generate_comprehensive_evaluation(
+        train_metrics, test_metrics, scenario_name, 
+        df=df, model_probs=model_probs, tree_results=tree_results
+    )
     
     # Find best model
     best_tree_name = max(tree_results, key=lambda k: tree_results[k]['test_acc'])
