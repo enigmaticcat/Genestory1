@@ -113,7 +113,7 @@ def evaluate(model, dataloader, criterion, device):
     return avg_loss, accuracy, all_preds, all_labels
 
 
-def cross_validate(train_dataset, n_features, device, scenario_name, profile_ids=None, class_weights=None):
+def cross_validate(full_data, n_features, device, scenario_name, class_weights=None):
     """
     Perform 5-fold cross-validation.
     
@@ -133,20 +133,43 @@ def cross_validate(train_dataset, n_features, device, scenario_name, profile_ids
     else:
         alpha_tensor = None
     
-    labels = train_dataset.labels.numpy()
+    X_full, y_full, groups_full, _ = full_data
     fold_accuracies = []
     
-    skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+    try:
+        skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+        splits = list(skf.split(X_full, groups_full))
+        print(f"  CV Stratified Strategy: Strata (NOC x MUX x INJ)")
+    except ValueError:
+        skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+        splits = list(skf.split(X_full, y_full))
+        print(f"  CV Stratified Strategy: NOC (Due to small strata < 5 samples)")
     
-    for fold, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(labels)), labels)):
+    from sklearn.preprocessing import MinMaxScaler
+    from src.dataset import DNAProfileDataset
+    
+    for fold, (train_idx, val_idx) in enumerate(splits):
         print(f"\n--- Fold {fold + 1}/{NUM_CV_FOLDS} ---")
         print(f"  Train: {len(train_idx)}, Val: {len(val_idx)}")
         
-        train_subset = Subset(train_dataset, train_idx)
-        val_subset = Subset(train_dataset, val_idx)
+        # Custom scaler per fold to avoid data leakage
+        fold_scaler = MinMaxScaler()
+        X_fold_train = fold_scaler.fit_transform(X_full[train_idx])
+        X_fold_val   = fold_scaler.transform(X_full[val_idx])
         
-        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-        val_loader = DataLoader(val_subset, batch_size=BATCH_SIZE, shuffle=False)
+        train_fold_ds = DNAProfileDataset(
+            torch.tensor(X_fold_train, dtype=torch.float32), 
+            torch.tensor(y_full[train_idx], dtype=torch.long), 
+            fit_scaler=False
+        )
+        val_fold_ds = DNAProfileDataset(
+            torch.tensor(X_fold_val, dtype=torch.float32), 
+            torch.tensor(y_full[val_idx], dtype=torch.long), 
+            fit_scaler=False
+        )
+        
+        train_loader = DataLoader(train_fold_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+        val_loader = DataLoader(val_fold_ds, batch_size=BATCH_SIZE, shuffle=False)
         
         model = TAWSEEM_MLP(input_dim=n_features).to(device)
         criterion = FocalLoss(alpha=alpha_tensor, gamma=2.0)

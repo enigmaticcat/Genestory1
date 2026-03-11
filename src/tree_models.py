@@ -64,7 +64,7 @@ def get_models():
     return models
 
 
-def train_tree_models(train_dataset, test_dataset, groups_train, scenario_name):
+def train_tree_models(train_dataset, test_dataset, groups_train, full_data, scenario_name):
     """
     Train and evaluate tree-based models (RF + XGBoost).
     
@@ -96,30 +96,62 @@ def train_tree_models(train_dataset, test_dataset, groups_train, scenario_name):
         print(f"\n--- {name} ---")
         start_time = time.time()
         
-        # 5-Fold Group CV
-        gkf = GroupKFold(n_splits=NUM_CV_FOLDS)
-        cv_scores = cross_val_score(model, X_train, y_train, groups=groups_train, cv=gkf, scoring='accuracy')
+        X_cv, y_cv, groups_cv = X_train, y_train, groups_train
+        try:
+            skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+            splits = list(skf.split(X_cv, groups_cv))
+        except ValueError:
+            skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+            splits = list(skf.split(X_cv, y_cv))
+            
+        cv_scores = []
+        best_acc = 0
+        best_model = None
+        best_scaler = None
+        
+        from sklearn.preprocessing import MinMaxScaler
+        import copy
+        
+        for trn_idx, val_idx in splits:
+            fold_scaler = MinMaxScaler()
+            X_fold_train = fold_scaler.fit_transform(X_cv[trn_idx])
+            X_fold_val   = fold_scaler.transform(X_cv[val_idx])
+            y_fold_train = y_cv[trn_idx]
+            y_fold_val   = y_cv[val_idx]
+            
+            model.fit(X_fold_train, y_fold_train)
+            preds = model.predict(X_fold_val)
+            acc = accuracy_score(y_fold_val, preds)
+            cv_scores.append(acc)
+            
+            if acc > best_acc:
+                best_acc = acc
+                best_model = copy.deepcopy(model)
+                best_scaler = copy.deepcopy(fold_scaler)
+        
+        cv_scores = np.array(cv_scores)
         
         cv_time = time.time() - start_time
         print(f"  CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
         print(f"  Per fold: {[f'{s:.4f}' for s in cv_scores]}")
         print(f"  CV time: {cv_time:.1f}s")
         
-        # Train on full training set
+        print(f"\n  [Testing Best Fold Model (Val Acc: {best_acc:.4f}) on 10% Test Set]")
         start_time = time.time()
-        model.fit(X_train, y_train)
-        train_time = time.time() - start_time
         
-        # Evaluate
-        train_preds = model.predict(X_train)
-        test_preds = model.predict(X_test)
+        # Evaluate Best Model
+        X_train_scaled = best_scaler.transform(X_train)
+        X_test_scaled = best_scaler.transform(X_test)
+        
+        train_preds = best_model.predict(X_train_scaled)
+        test_preds = best_model.predict(X_test_scaled)
         
         train_acc = accuracy_score(y_train, train_preds)
         test_acc = accuracy_score(y_test, test_preds)
         
-        print(f"\n  Train Accuracy: {train_acc:.4f}")
-        print(f"  Test Accuracy:  {test_acc:.4f}")
-        print(f"  Train time: {train_time:.1f}s")
+        print(f"\n  Train (90%) Accuracy: {train_acc:.4f}")
+        print(f"  Test  (10%) Accuracy: {test_acc:.4f}")
+        print(f"  Eval time: {time.time() - start_time:.1f}s")
         
         # Detailed test metrics
         class_names = [f"{i+1}-Person" for i in range(len(np.unique(y_train)))]

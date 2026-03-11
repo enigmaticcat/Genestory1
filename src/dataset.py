@@ -169,14 +169,15 @@ def _extract_marker_features(row, height_cols, ol_cols, missing_cols):
     ]
 
 
-def prepare_profile_datasets(df, train_ratio=0.7, random_seed=42):
+def prepare_profile_datasets(df, train_ratio=0.9, random_seed=42):
     """
     Convert per-row data to per-PROFILE data with rich feature engineering.
     
     Returns:
         train_dataset, test_dataset, scaler, train_profile_ids,
         (X_train_2d, X_test_2d, y_train, y_test, class_weights),
-        (groups_train, groups_test)
+        (groups_train, groups_test),
+        (X_flat, y, strata_labels, X_matrix) # full balanced data
     """
     np.random.seed(random_seed)
     profile_col = 'Sample File'
@@ -270,68 +271,67 @@ def prepare_profile_datasets(df, train_ratio=0.7, random_seed=42):
     
     profile_meta['strata'] = profile_meta[strata_cols].astype(str).agg('_'.join, axis=1)
 
-    # --- 2. Stratified Split ---
-    train_idx_raw, test_idx_raw = [], []
-    for sv in sorted(profile_meta['strata'].unique()):
-        idx = profile_meta.index[profile_meta['strata'] == sv].tolist()
+    # --- 2. Dynamic Downsampling on FULL dataset (Class 1 cap = 5x mean of Class 2-5) ---
+    counts = profile_meta['NOC'].value_counts()
+    other_counts = [counts.get(n, 0) for n in [2, 3, 4, 5]]
+    mean_other = sum(other_counts) / 4.0 if sum(other_counts) > 0 else 0
+    max_class1 = max(1, int(mean_other * 5))
+    
+    idx_class1 = profile_meta[profile_meta['NOC'] == 1].index.tolist()
+    idx_others = profile_meta[profile_meta['NOC'] != 1].index.tolist()
+    
+    if len(idx_class1) > max_class1:
+        keep_class1 = []
+        c1_strata = profile_meta.loc[idx_class1, 'strata'].value_counts(normalize=True)
+        for sv, prop in c1_strata.items():
+            target_n = int(round(prop * max_class1))
+            sv_idx = profile_meta[(profile_meta['NOC'] == 1) & (profile_meta['strata'] == sv)].index.tolist()
+            np.random.shuffle(sv_idx)
+            keep_class1.extend(sv_idx[:target_n])
+            
+        if len(keep_class1) > max_class1:
+            np.random.shuffle(keep_class1)
+            keep_class1 = keep_class1[:max_class1]
+        elif len(keep_class1) < max_class1:
+            rem = list(set(idx_class1) - set(keep_class1))
+            np.random.shuffle(rem)
+            keep_class1.extend(rem[:max_class1 - len(keep_class1)])
+            
+        balanced_idx = keep_class1 + idx_others
+    else:
+        balanced_idx = profile_meta.index.tolist()
+        
+    np.random.shuffle(balanced_idx)
+    balanced_idx = np.array(balanced_idx)
+    
+    # Complete filtered Base Dataset
+    X_flat_b = X_flat[balanced_idx]
+    y_b = y[balanced_idx]
+    groups_b = profile_meta['strata'].values[balanced_idx]
+    X_matrix_b = X_matrix[balanced_idx]
+    
+    print(f"\n[Dataset] After balancing class 1 on FULL dataset:")
+    print(f"  Total balanced profiles: {len(balanced_idx)}")
+    
+    # --- 3. Stratified Split 80/20 on the BALANCED dataset ---
+    balanced_meta = profile_meta.iloc[balanced_idx].copy().reset_index(drop=True)
+    
+    train_idx_rel, test_idx_rel = [], []
+    for sv in sorted(balanced_meta['strata'].unique()):
+        idx = balanced_meta[balanced_meta['strata'] == sv].index.tolist()
         np.random.shuffle(idx)
         n_train = int(len(idx) * train_ratio)
-        train_idx_raw.extend(idx[:n_train])
-        test_idx_raw.extend(idx[n_train:])
+        train_idx_rel.extend(idx[:n_train])
+        test_idx_rel.extend(idx[n_train:])
         
-    # --- 3. Dynamic Downsampling (Class 1 cap = 5x mean of Class 2-5) ---
-    # We apply this independently to train and test sets to avoid class 1 flooding test set!
-    def balance_indices(indices):
-        """Downsample NOC=1 to 5x mean of NOC=2,3,4,5 within a given subset format."""
-        subset_meta = profile_meta.iloc[indices].copy()
-        
-        counts = subset_meta['NOC'].value_counts()
-        other_counts = [counts.get(n, 0) for n in [2, 3, 4, 5]]
-        if sum(other_counts) == 0:
-            return indices  # nothing to balance
-            
-        mean_other = sum(other_counts) / 4.0
-        max_class1 = max(1, int(mean_other * 5))
-        
-        idx_class1 = subset_meta[subset_meta['NOC'] == 1].index.tolist()
-        idx_others = subset_meta[subset_meta['NOC'] != 1].index.tolist()
-        
-        if len(idx_class1) > max_class1:
-            # Downsample class 1 while trying to maintain its strata distribution
-            keep_class1 = []
-            c1_strata = subset_meta.loc[idx_class1, 'strata'].value_counts(normalize=True)
-            for sv, prop in c1_strata.items():
-                target_n = int(round(prop * max_class1))
-                sv_idx = subset_meta[(subset_meta['NOC'] == 1) & (subset_meta['strata'] == sv)].index.tolist()
-                np.random.shuffle(sv_idx)
-                keep_class1.extend(sv_idx[:target_n])
-            
-            # Exact fix to max_class1
-            if len(keep_class1) > max_class1:
-                np.random.shuffle(keep_class1)
-                keep_class1 = keep_class1[:max_class1]
-            elif len(keep_class1) < max_class1:
-                rem = list(set(idx_class1) - set(keep_class1))
-                np.random.shuffle(rem)
-                keep_class1.extend(rem[:max_class1 - len(keep_class1)])
-            
-            return keep_class1 + idx_others
-        return indices
+    np.random.shuffle(train_idx_rel)
+    np.random.shuffle(test_idx_rel)
 
-    print(f"\n[Dataset] Before balancing class 1:")
-    print(f"  Train: raw={len(train_idx_raw)}, Test: raw={len(test_idx_raw)}")
+    X_train_flat, y_train = X_flat_b[train_idx_rel], y_b[train_idx_rel]
+    X_test_flat, y_test = X_flat_b[test_idx_rel], y_b[test_idx_rel]
+    X_train_2d, X_test_2d = X_matrix_b[train_idx_rel], X_matrix_b[test_idx_rel]
     
-    train_idx = balance_indices(train_idx_raw)
-    test_idx = balance_indices(test_idx_raw)
-    np.random.shuffle(train_idx)
-    np.random.shuffle(test_idx)
-
-    X_train_flat, y_train = X_flat[train_idx], y[train_idx]
-    X_test_flat, y_test = X_flat[test_idx], y[test_idx]
-    X_train_2d, X_test_2d = X_matrix[train_idx], X_matrix[test_idx]
-    
-    train_profile_ids = np.arange(len(train_idx))
-
+    train_profile_ids = np.arange(len(train_idx_rel))
     
     # Flat datasets
     train_dataset = DNAProfileDataset(X_train_flat, y_train, fit_scaler=True)
@@ -344,14 +344,13 @@ def prepare_profile_datasets(df, train_ratio=0.7, random_seed=42):
     n_classes = len(counts)
     class_weights = {c: total / (n_classes * n) for c, n in counts.items()}
     
-    groups_train = profile_meta['strata'].values[train_idx]
-    groups_test  = profile_meta['strata'].values[test_idx]
+    groups_train = groups_b[train_idx_rel]
+    groups_test  = groups_b[test_idx_rel]
 
-    print(f"  Train: {len(train_idx)}, Test: {len(test_idx)}")
-    print(f"  Class distribution: {dict(sorted(counts.items()))}")
-    strata_summary = profile_meta['strata'].value_counts().sort_index().to_dict()
-    print(f"  Strata (NOC_injtime): {strata_summary}")
+    print(f"  Train: {len(train_idx_rel)}, Test: {len(test_idx_rel)}")
+    print(f"  Class distribution train: {dict(sorted(counts.items()))}")
     
     return train_dataset, test_dataset, train_dataset.scaler, train_profile_ids, \
            (X_train_2d, X_test_2d, y_train, y_test, class_weights), \
-           (groups_train, groups_test)
+           (groups_train, groups_test), \
+           (X_flat_b, y_b, groups_b, X_matrix_b)

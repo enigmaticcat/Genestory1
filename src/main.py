@@ -55,8 +55,7 @@ def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
     # --- Step 4: Cross-validation (MLP) ---
     if not skip_cv:
         cv_accuracies = cross_validate(
-            train_dataset, n_features, device, scenario_name,
-            profile_ids=train_profile_ids,
+            full_data, n_features, device, scenario_name,
             class_weights=class_weights,
         )
     
@@ -67,7 +66,7 @@ def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
     )
     
     # --- Step 6: Train tree-based models (RF + XGBoost) ---
-    tree_results = train_tree_models(train_dataset, test_dataset, groups_train, scenario_name)
+    tree_results = train_tree_models(train_dataset, test_dataset, groups_train, full_data, scenario_name)
     
     # --- Step 7: Generate plots ---
     generate_all_plots(train_metrics, test_metrics, scenario_name)

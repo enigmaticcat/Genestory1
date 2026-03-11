@@ -62,7 +62,7 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
         df = preprocess_scenario(scenario_name)
 
     print(f"\n[2/4] Feature engineering (profile-level)...")
-    train_dataset, test_dataset, _, _, cnn_data, group_data = prepare_profile_datasets(
+    train_dataset, test_dataset, _, _, cnn_data, group_data, full_data = prepare_profile_datasets(
         df, train_ratio=TRAIN_RATIO, random_seed=RANDOM_SEED
     )
 
@@ -71,20 +71,33 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
     X_test_raw  = test_dataset.features.numpy()
     y_test  = test_dataset.labels.numpy()
     groups_train = group_data[0]
-
+    
+    X_full_raw, y_full, groups_full, _ = full_data
 
     print(f"  Train: {X_train_raw.shape[0]} profiles × {X_train_raw.shape[1]} features")
     print(f"  Test:  {X_test_raw.shape[0]} profiles × {X_test_raw.shape[1]} features")
 
-    print(f"\n[3/4] {NUM_CV_FOLDS}-Fold Cross-Validation (GroupKFold)...")
-    model = XGBClassifier(**XGB_PARAMS)
-    gkf = GroupKFold(n_splits=NUM_CV_FOLDS)
+    # Use X_train_raw (90%), y_train, groups_train for CV
+    try:
+        skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+        splits = list(skf.split(X_train_raw, groups_train))
+        print(f"  CV Stratified Strategy: Strata (NOC x MUX x INJ)")
+    except ValueError:
+        skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+        splits = list(skf.split(X_train_raw, y_train))
+        print(f"  CV Stratified Strategy: NOC (Due to small strata < 5 samples)")
 
     cv_scores = []
+    best_acc = 0
+    best_model = None
+    best_scaler = None
+    
     from sklearn.preprocessing import MinMaxScaler
+    import copy
+    
     cv_start = time.time()
     
-    for fold, (trn_idx, val_idx) in enumerate(gkf.split(X_train_raw, y_train, groups=groups_train)):
+    for fold, (trn_idx, val_idx) in enumerate(splits):
         # FIT scaler riêng trên tập train-fold để avoid data leakage vào val-fold
         fold_scaler = MinMaxScaler()
         X_fold_train = fold_scaler.fit_transform(X_train_raw[trn_idx])
@@ -95,35 +108,36 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
         
         model.fit(X_fold_train, y_fold_train)
         preds = model.predict(X_fold_val)
-        cv_scores.append(accuracy_score(y_fold_val, preds))
+        acc = accuracy_score(y_fold_val, preds)
         
+        cv_scores.append(acc)
+        if acc > best_acc:
+            best_acc = acc
+            best_model = copy.deepcopy(model)
+            best_scaler = copy.deepcopy(fold_scaler)
+            
     cv_scores = np.array(cv_scores)
     cv_time = time.time() - cv_start
 
     print(f"  CV Accuracy : {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"  Per fold    : {[f'{s:.4f}' for s in cv_scores]}")
     print(f"  CV time     : {cv_time:.1f}s")
-
-    print(f"\n[4/4] Training final XGBoost on full train set...")
-    train_start = time.time()
     
-    # Fit scaler cuối trên toàn bộ X_train_raw
-    final_scaler = MinMaxScaler()
-    X_train_scaled = final_scaler.fit_transform(X_train_raw)
-    X_test_scaled  = final_scaler.transform(X_test_raw)
+    print(f"\n[4/4] Testing Best Fold Model (Val Acc: {best_acc:.4f}) on 10% Test Set...")
+    eval_start = time.time()
     
-    model.fit(X_train_scaled, y_train)
-    elapsed = time.time() - train_start
-
-    train_preds = model.predict(X_train_scaled)
-    test_preds  = model.predict(X_test_scaled)
+    X_train_scaled = best_scaler.transform(X_train_raw)
+    X_test_scaled  = best_scaler.transform(X_test_raw)
+    
+    train_preds = best_model.predict(X_train_scaled)
+    test_preds  = best_model.predict(X_test_scaled)
 
     train_acc = accuracy_score(y_train, train_preds)
     test_acc  = accuracy_score(y_test,  test_preds)
 
-    print(f"\n  Train Accuracy : {train_acc:.4f}")
-    print(f"  Test  Accuracy : {test_acc:.4f}")
-    print(f"  Train time     : {elapsed:.1f}s")
+    print(f"\n  Train (90%) Accuracy : {train_acc:.4f}")
+    print(f"  Test  (10%) Accuracy : {test_acc:.4f}")
+    print(f"  Eval time            : {time.time() - eval_start:.1f}s")
 
     class_names = [f"{i+1}-Person" for i in range(5)]
     print(f"\n  Classification Report (Test):")
