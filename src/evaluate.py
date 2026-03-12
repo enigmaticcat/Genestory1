@@ -563,3 +563,142 @@ def generate_all_plots(train_metrics, test_metrics, scenario_name, df=None, mode
             f'TAWSEEM ROC Curves - Comparison ({scenario_display})',
             os.path.join(RESULTS_DIR, f'{scenario_name}_roc_comparison.png')
         )
+
+
+def print_unified_test_results(test_metrics, tree_results, scenario_name):
+    """
+    Print unified test results for all 3 models (MLP, RF, XGBoost) side by side.
+    
+    Args:
+        test_metrics: MLP test metrics dict
+        tree_results: dict with RF and XGBoost results
+        scenario_name: scenario name for display
+    """
+    scenario_display = scenario_name.replace('_', ' ').title()
+    
+    print(f"\n{'='*80}")
+    print(f"UNIFIED TEST SET RESULTS - {scenario_display}")
+    print(f"{'='*80}")
+    
+    # Collect results from all models
+    all_models = {}
+    
+    # MLP results
+    all_models['MLP'] = {
+        'accuracy': test_metrics['accuracy'],
+        'precision_macro': test_metrics['precision_macro'],
+        'recall_macro': test_metrics['recall_macro'],
+        'f1_macro': test_metrics['f1_macro'],
+        'confusion_matrix': test_metrics['confusion_matrix'],
+        'y_true': test_metrics['y_true'],
+        'y_pred': test_metrics['y_pred'],
+        'precision_per_class': test_metrics['precision_per_class'],
+        'recall_per_class': test_metrics['recall_per_class'],
+        'f1_per_class': test_metrics['f1_per_class'],
+    }
+    
+    # Tree models results
+    if tree_results:
+        for model_name in ['RandomForest', 'XGBoost', 'GradientBoosting']:
+            if model_name in tree_results:
+                res = tree_results[model_name]
+                y_pred = res['test_preds']
+                y_true = test_metrics['y_true']  # Use same true labels
+                
+                metrics = {
+                    'accuracy': res['test_acc'],
+                    'precision_macro': precision_score(y_true, y_pred, average='macro', zero_division=0),
+                    'recall_macro': recall_score(y_true, y_pred, average='macro', zero_division=0),
+                    'f1_macro': f1_score(y_true, y_pred, average='macro', zero_division=0),
+                    'confusion_matrix': confusion_matrix(y_true, y_pred),
+                    'y_true': y_true,
+                    'y_pred': y_pred,
+                    'precision_per_class': precision_score(y_true, y_pred, average=None, zero_division=0),
+                    'recall_per_class': recall_score(y_true, y_pred, average=None, zero_division=0),
+                    'f1_per_class': f1_score(y_true, y_pred, average=None, zero_division=0),
+                }
+                
+                display_name = 'Random Forest' if model_name == 'RandomForest' else model_name
+                all_models[display_name] = metrics
+    
+    # Print overall metrics table
+    print(f"\n{'Model':<18} {'Accuracy':>12} {'Precision':>12} {'Recall':>12} {'F1-Score':>12}")
+    print(f"{'-'*66}")
+    
+    for model_name in ['MLP', 'Random Forest', 'XGBoost', 'GradientBoosting']:
+        if model_name in all_models:
+            m = all_models[model_name]
+            print(f"{model_name:<18} {m['accuracy']:>12.4f} {m['precision_macro']:>12.4f} "
+                  f"{m['recall_macro']:>12.4f} {m['f1_macro']:>12.4f}")
+    
+    # Print detailed per-class metrics for each model
+    print(f"\n{'='*80}")
+    print("DETAILED PER-CLASS METRICS")
+    print(f"{'='*80}")
+    
+    for model_name in ['MLP', 'Random Forest', 'XGBoost', 'GradientBoosting']:
+        if model_name in all_models:
+            m = all_models[model_name]
+            print(f"\n{model_name}:")
+            print(f"  {'Class':<15} {'Precision':>12} {'Recall':>12} {'F1-Score':>12}")
+            print(f"  {'-'*52}")
+            for i in range(len(m['precision_per_class'])):
+                class_name = CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class {i}"
+                print(f"  {class_name:<15} {m['precision_per_class'][i]:>12.4f} "
+                      f"{m['recall_per_class'][i]:>12.4f} {m['f1_per_class'][i]:>12.4f}")
+    
+    print(f"\n{'='*80}\n")
+    
+    return all_models
+
+
+def plot_all_confusion_matrices(test_metrics, tree_results, scenario_name):
+    """
+    Create a figure with confusion matrices for all 3 models.
+    
+    Args:
+        test_metrics: MLP test metrics dict
+        tree_results: dict with RF and XGBoost results
+        scenario_name: scenario name for display
+    """
+    scenario_display = scenario_name.replace('_', ' ').title()
+    
+    # Collect confusion matrices
+    cms = {}
+    
+    # MLP
+    cms['MLP'] = test_metrics['confusion_matrix']
+    
+    # Tree models
+    if tree_results:
+        y_true = test_metrics['y_true']
+        if 'RandomForest' in tree_results:
+            cms['Random Forest'] = confusion_matrix(y_true, tree_results['RandomForest']['test_preds'])
+        if 'XGBoost' in tree_results:
+            cms['XGBoost'] = confusion_matrix(y_true, tree_results['XGBoost']['test_preds'])
+        if 'GradientBoosting' in tree_results:
+            cms['GradientBoosting'] = confusion_matrix(y_true, tree_results['GradientBoosting']['test_preds'])
+    
+    # Plot all confusion matrices in one figure
+    fig, axes = plt.subplots(1, len(cms), figsize=(6*len(cms), 5))
+    
+    if len(cms) == 1:
+        axes = [axes]
+    
+    for idx, (model_name, cm) in enumerate(cms.items()):
+        ax = axes[idx]
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax,
+                    cbar_kws={'shrink': 0.8})
+        ax.set_xlabel('Predicted', fontsize=11)
+        ax.set_ylabel('Actual', fontsize=11)
+        ax.set_title(f'{model_name}', fontsize=12, fontweight='bold')
+    
+    fig.suptitle(f'TAWSEEM - Test Set Confusion Matrices - {scenario_display}', 
+                 fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    save_path = os.path.join(RESULTS_DIR, f'{scenario_name}_all_confusion_matrices.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved all confusion matrices: {save_path}")

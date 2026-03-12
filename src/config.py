@@ -133,8 +133,8 @@ NUM_DROPOUT_LAYERS = 7
 DROPOUT_RATE = 0.2
 NUM_CLASSES = 5  # NOC: 1, 2, 3, 4, 5
 LEARNING_RATE = 0.001  # Default Adam LR
-EPOCHS = 200
-BATCH_SIZE = 30
+EPOCHS = 1000
+BATCH_SIZE = 200
 EARLY_STOPPING_PATIENCE = 30  # stop early if val accuracy stagnates for N epochs
 # NOTE: MAX_PROFILES_CLASS1 removed — class 1 cap is now computed dynamically
 # in step9_balance_dataset as: floor(mean(NOC 2-5 profile counts) / 5)

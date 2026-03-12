@@ -1,8 +1,3 @@
-"""
-TAWSEEM Training Pipeline
-Training loop with 5-fold cross-validation.
-"""
-
 import os
 import time
 import numpy as np
@@ -217,15 +212,56 @@ def cross_validate(full_data, n_features, device, scenario_name, class_weights=N
 
 def train_final_model(train_dataset, test_dataset, n_features, device, scenario_name, class_weights=None):
     """
-    Train the final model on the full training set and evaluate on test set.
+    Train the final model on the full training set WITHOUT touching test set.
+    
+    IMPORTANT: Test set is ONLY used for final evaluation AFTER training.
+    Early stopping uses a held-out validation split from training data.
     
     Returns: model, train_metrics, test_metrics, elapsed_time
     """
     print(f"\n{'='*50}")
     print(f"Training Final Model")
     print(f"{'='*50}")
+    print(f"  ⚠️  Data Split Principle:")
+    print(f"      • Train on: 90% data (full training set)")
+    print(f"      • Validation: Hold-out from 90% for early stopping")
+    print(f"      • Test on: 10% data (NEVER touched during training)")
+    
+    # Extract data from datasets for splitting
+    X_train = train_dataset.features.numpy()
+    y_train = train_dataset.labels.numpy()
+    
+    # Create a validation split from training data (8% of original = 11% of 90%)
+    from sklearn.model_selection import StratifiedShuffleSplit
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.111, random_state=RANDOM_SEED)
+    for fit_idx, val_idx in sss.split(X_train, y_train - 1):  # y_train is 1-indexed
+        X_train_only = X_train[fit_idx]
+        y_train_only = y_train[fit_idx]
+        X_val_only = X_train[val_idx]
+        y_val_only = y_train[val_idx]
+    
+    # Normalize training-only data
+    from sklearn.preprocessing import MinMaxScaler
+    final_scaler = MinMaxScaler()
+    X_train_only_scaled = final_scaler.fit_transform(X_train_only)
+    X_val_only_scaled = final_scaler.transform(X_val_only)
+    
+    # Create dataloaders
+    train_only_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_train_only_scaled, dtype=torch.float32),
+        torch.tensor(y_train_only - 1, dtype=torch.long),
+    )
+    val_only_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_val_only_scaled, dtype=torch.float32),
+        torch.tensor(y_val_only - 1, dtype=torch.long),
+    )
+    
+    train_loader = DataLoader(train_only_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    val_loader = DataLoader(val_only_ds, batch_size=BATCH_SIZE, shuffle=False)
+    
+    print(f"  Train only: {len(X_train_only)}, Val (hold-out): {len(X_val_only)}")
 
-    # Build Focal Loss với class weights (NOC 1-5 → index 0-4)
+    # Build Focal Loss with class weights (NOC 1-5 → index 0-4)
     if class_weights is not None:
         alpha_tensor = torch.tensor(
             [class_weights.get(i + 1, 1.0) for i in range(5)],
@@ -234,9 +270,6 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
         print(f"  Focal Loss alpha: {[f'{class_weights.get(i+1, 1.0):.3f}' for i in range(5)]}")
     else:
         alpha_tensor = None
-    
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     # Create model
     model = TAWSEEM_MLP(input_dim=n_features).to(device)
@@ -247,18 +280,19 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     
     start_time = time.time()
     
-    best_test_acc = 0
+    best_val_acc = 0
     patience_counter = 0
     model_path = os.path.join(RESULTS_DIR, f"{scenario_name}_best_model.pth")
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
+    print(f"\n  Early stopping based on VALIDATION set (NOT test set)")
     for epoch in range(EPOCHS):
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        test_loss, test_acc, _, _, _ = evaluate(model, test_loader, criterion, device)
+        val_loss, val_acc, _, _, _ = evaluate(model, val_loader, criterion, device)
 
-        # Save best model & early stopping
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
+        # Early stopping based on validation set
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             patience_counter = 0
             torch.save(model.state_dict(), model_path)
         else:
@@ -267,21 +301,44 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"  Epoch {epoch+1:3d}/{EPOCHS}: "
                   f"Train Loss={train_loss:.4f}, Acc={train_acc:.4f} | "
-                  f"Test Loss={test_loss:.4f}, Acc={test_acc:.4f} "
+                  f"Val Loss={val_loss:.4f}, Acc={val_acc:.4f} "
                   f"[patience {patience_counter}/{EARLY_STOPPING_PATIENCE}]")
 
         if patience_counter >= EARLY_STOPPING_PATIENCE:
-            print(f"\n  Early stopping at epoch {epoch+1} (best test acc: {best_test_acc:.4f})")
+            print(f"\n  Early stopping at epoch {epoch+1} (best val acc: {best_val_acc:.4f})")
             break
     
     elapsed_time = time.time() - start_time
     print(f"\nTraining completed in {elapsed_time:.1f} seconds")
     
-    # Load best model for final evaluation
+    # Load best model
     model.load_state_dict(torch.load(model_path, weights_only=True))
     
-    # Final evaluation on train and test
-    _, train_acc, train_preds, train_labels, train_probs = evaluate(model, train_loader, criterion, device)
+    # === FINAL EVALUATION (ONLY NOW, after training) ===
+    print(f"\n{'='*50}")
+    print(f"Final Evaluation on Test Set (10% - NEVER SEEN)")
+    print(f"{'='*50}")
+    
+    # Scale test set using the same scaler from training
+    X_test = test_dataset.features.numpy()
+    y_test = test_dataset.labels.numpy()
+    X_test_scaled = final_scaler.transform(X_test)
+    
+    test_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_test_scaled, dtype=torch.float32),
+        torch.tensor(y_test - 1, dtype=torch.long),
+    )
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # Also evaluate on full training set for reference
+    X_train_scaled = final_scaler.transform(X_train)
+    train_full_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_train_scaled, dtype=torch.float32),
+        torch.tensor(y_train - 1, dtype=torch.long),
+    )
+    train_full_loader = DataLoader(train_full_ds, batch_size=BATCH_SIZE, shuffle=False)
+    
+    _, train_acc, train_preds, train_labels, train_probs = evaluate(model, train_full_loader, criterion, device)
     _, test_acc, test_preds, test_labels, test_probs = evaluate(model, test_loader, criterion, device)
     
     # Compute detailed metrics
@@ -291,10 +348,10 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     train_metrics['probs'] = train_probs
     test_metrics['probs']  = test_probs
     
-    print(f"\n--- Training Set Metrics ---")
+    print(f"\n--- Training Set (90%) Metrics ---")
     print_metrics(train_metrics)
     
-    print(f"\n--- Test Set Metrics ---")
+    print(f"\n--- Test Set (10%) Metrics ---")
     print_metrics(test_metrics)
     
     return model, train_metrics, test_metrics, elapsed_time

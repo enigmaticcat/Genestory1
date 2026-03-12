@@ -16,7 +16,10 @@ from src.data_preprocessing import preprocess_scenario
 from src.dataset import prepare_datasets, prepare_profile_datasets
 from src.train import cross_validate, train_final_model
 from src.tree_models import train_tree_models
-from src.evaluate import generate_all_plots, plot_accuracy_comparison, generate_comprehensive_evaluation
+from src.evaluate import (
+    generate_all_plots, plot_accuracy_comparison, generate_comprehensive_evaluation,
+    print_unified_test_results, plot_all_confusion_matrices
+)
 
 
 def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
@@ -80,6 +83,13 @@ def run_scenario(scenario_name, skip_preprocessing=False, skip_cv=False):
         train_metrics, test_metrics, scenario_name, 
         df=df, model_probs=model_probs, tree_results=tree_results
     )
+    
+    # --- Step 8: Print unified test results for all 3 models ---
+    print_unified_test_results(test_metrics, tree_results, scenario_name)
+    
+    # --- Step 9: Plot all confusion matrices together ---
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    plot_all_confusion_matrices(test_metrics, tree_results, scenario_name)
     
     # Find best model
     best_tree_name = max(tree_results, key=lambda k: tree_results[k]['test_acc'])
