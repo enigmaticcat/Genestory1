@@ -33,6 +33,8 @@ class FocalLoss(nn.Module):
 
     def forward(self, inputs, targets):
         # inputs: (N, C), targets: (N,)
+        # Ensure targets are within valid range [0, num_classes-1]
+        targets = targets.long()
         log_pt = nn.functional.log_softmax(inputs, dim=1)
         log_pt = log_pt.gather(1, targets.unsqueeze(1)).squeeze(1)  # (N,)
         pt = log_pt.exp()
@@ -61,6 +63,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
     
     for features, labels in dataloader:
         features, labels = features.to(device), labels.to(device)
+        
+        # Ensure labels are valid (0-4)
+        assert (labels >= 0).all() and (labels < 5).all(), f"Invalid label range: {labels.min()}-{labels.max()}"
         
         optimizer.zero_grad()
         outputs = model(features)
@@ -228,13 +233,14 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     print(f"      • Test on: 10% data (NEVER touched during training)")
     
     # Extract data from datasets for splitting
+    # NOTE: train_dataset.labels are already 0-4 (from DNAProfileDataset)
     X_train = train_dataset.features.numpy()
-    y_train = train_dataset.labels.numpy()
+    y_train = train_dataset.labels.numpy()  # Already 0-4
     
     # Create a validation split from training data (8% of original = 11% of 90%)
     from sklearn.model_selection import StratifiedShuffleSplit
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.111, random_state=RANDOM_SEED)
-    for fit_idx, val_idx in sss.split(X_train, y_train - 1):  # y_train is 1-indexed
+    for fit_idx, val_idx in sss.split(X_train, y_train):  # y_train is already 0-4
         X_train_only = X_train[fit_idx]
         y_train_only = y_train[fit_idx]
         X_val_only = X_train[val_idx]
@@ -249,11 +255,11 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     # Create dataloaders
     train_only_ds = torch.utils.data.TensorDataset(
         torch.tensor(X_train_only_scaled, dtype=torch.float32),
-        torch.tensor(y_train_only - 1, dtype=torch.long),
+        torch.tensor(y_train_only, dtype=torch.long),  # Already 0-4
     )
     val_only_ds = torch.utils.data.TensorDataset(
         torch.tensor(X_val_only_scaled, dtype=torch.float32),
-        torch.tensor(y_val_only - 1, dtype=torch.long),
+        torch.tensor(y_val_only, dtype=torch.long),  # Already 0-4
     )
     
     train_loader = DataLoader(train_only_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
@@ -321,12 +327,12 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     
     # Scale test set using the same scaler from training
     X_test = test_dataset.features.numpy()
-    y_test = test_dataset.labels.numpy()
+    y_test = test_dataset.labels.numpy()  # Already 0-4
     X_test_scaled = final_scaler.transform(X_test)
     
     test_ds = torch.utils.data.TensorDataset(
         torch.tensor(X_test_scaled, dtype=torch.float32),
-        torch.tensor(y_test - 1, dtype=torch.long),
+        torch.tensor(y_test, dtype=torch.long),  # Already 0-4
     )
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
     
@@ -334,7 +340,7 @@ def train_final_model(train_dataset, test_dataset, n_features, device, scenario_
     X_train_scaled = final_scaler.transform(X_train)
     train_full_ds = torch.utils.data.TensorDataset(
         torch.tensor(X_train_scaled, dtype=torch.float32),
-        torch.tensor(y_train - 1, dtype=torch.long),
+        torch.tensor(y_train, dtype=torch.long),  # Already 0-4
     )
     train_full_loader = DataLoader(train_full_ds, batch_size=BATCH_SIZE, shuffle=False)
     
