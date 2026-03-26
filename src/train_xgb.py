@@ -28,6 +28,13 @@ except ImportError:
     print("XGBoost chưa được cài. Chạy: pip install xgboost")
     sys.exit(1)
 
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:
+    print("[WARN] SHAP chưa được cài — SHAP analysis sẽ bị bỏ qua. Chạy: pip install shap")
+    HAS_SHAP = False
+
 
 # ============================================================
 # Cấu hình XGBoost
@@ -47,7 +54,129 @@ XGB_PARAMS = dict(
 )
 
 
-def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
+# ============================================================
+# SHAP Analysis
+# ============================================================
+def run_shap_analysis(
+    model,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    class_names: list,
+    scenario_name: str,
+    results_dir: str,
+    max_display: int = 20,
+    n_background: int = 100,
+):
+    """
+    Chạy SHAP TreeExplainer trên best_model và lưu 4 loại biểu đồ:
+      1. Summary plot (beeswarm)   — toàn bộ test set, tất cả class
+      2. Bar plot (mean |SHAP|)    — feature importance tổng hợp
+      3. Waterfall plot            — 1 mẫu đại diện mỗi class
+      4. Decision plot             — 20 mẫu ngẫu nhiên theo class
+    """
+    print(f"\n[SHAP] Running SHAP TreeExplainer for scenario '{scenario_name}'...")
+    shap_dir = os.path.join(results_dir, f"{scenario_name}_shap")
+    os.makedirs(shap_dir, exist_ok=True)
+
+    # ── Explainer & values ──────────────────────────────────────
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer(X_test)          # shape: (n_samples, n_features, n_classes)
+    print(f"  SHAP values computed. Shape: {shap_values.values.shape}")
+
+    n_classes = len(class_names)
+    n_features = X_test.shape[1]
+    feature_names = [f"F{i:03d}" for i in range(n_features)]
+
+    # ── 1. Summary plot (beeswarm, per class) ───────────────────
+    print("  [1/4] Summary beeswarm plots...")
+    for cls_idx, cls_name in enumerate(class_names):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        shap.summary_plot(
+            shap_values.values[:, :, cls_idx],
+            X_test,
+            feature_names=feature_names,
+            max_display=max_display,
+            show=False,
+            plot_type="dot",
+        )
+        plt.title(f"SHAP Beeswarm — {scenario_name} | Class: {cls_name}", fontsize=12)
+        plt.tight_layout()
+        path = os.path.join(shap_dir, f"shap_beeswarm_class{cls_idx+1}.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    # ── 2. Global Bar plot (mean |SHAP| across all classes) ─────
+    print("  [2/4] Global bar plot (mean |SHAP|)...")
+    # Average absolute SHAP across classes
+    mean_abs_shap = np.abs(shap_values.values).mean(axis=(0, 2))  # (n_features,)
+    top_idx = np.argsort(mean_abs_shap)[::-1][:max_display]
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.barh(
+        [feature_names[i] for i in reversed(top_idx)],
+        mean_abs_shap[list(reversed(top_idx))],
+        color="#2196F3",
+        edgecolor="white",
+    )
+    ax.set_xlabel("Mean |SHAP value|")
+    ax.set_title(f"SHAP Global Feature Importance — {scenario_name}", fontsize=12)
+    ax.invert_yaxis()
+    plt.tight_layout()
+    path = os.path.join(shap_dir, "shap_bar_global.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    Top 5 features: {[feature_names[i] for i in top_idx[:5]]}")
+
+    # ── 3. Waterfall plot — 1 representative sample per class ───
+    print("  [3/4] Waterfall plots (1 sample/class)...")
+    for cls_idx, cls_name in enumerate(class_names):
+        mask = np.where(y_test == cls_idx)[0]
+        if len(mask) == 0:
+            continue
+        sample_idx = mask[0]  # first sample of this class
+        fig, ax = plt.subplots(figsize=(10, 5))
+        shap.waterfall_plot(
+            shap.Explanation(
+                values=shap_values.values[sample_idx, :, cls_idx],
+                base_values=shap_values.base_values[sample_idx, cls_idx],
+                data=X_test[sample_idx],
+                feature_names=feature_names,
+            ),
+            max_display=15,
+            show=False,
+        )
+        plt.title(f"SHAP Waterfall — {cls_name} (sample #{sample_idx})", fontsize=11)
+        plt.tight_layout()
+        path = os.path.join(shap_dir, f"shap_waterfall_class{cls_idx+1}.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    # ── 4. Decision plot — 20 random samples ────────────────────
+    print("  [4/4] Decision plot (20 random samples)...")
+    np.random.seed(42)
+    sample_size = min(20, len(X_test))
+    rand_idx = np.random.choice(len(X_test), size=sample_size, replace=False)
+    # Use class 0 (NOC=1) perspective for decision plot
+    for cls_idx, cls_name in enumerate(class_names):
+        base_val = shap_values.base_values[rand_idx, cls_idx].mean()
+        fig, ax = plt.subplots(figsize=(10, 7))
+        shap.decision_plot(
+            base_val,
+            shap_values.values[rand_idx, :, cls_idx],
+            feature_names=feature_names,
+            feature_display_range=slice(-1, -max_display - 1, -1),
+            show=False,
+        )
+        plt.title(f"SHAP Decision Plot — {cls_name} ({sample_size} samples)", fontsize=11)
+        plt.tight_layout()
+        path = os.path.join(shap_dir, f"shap_decision_class{cls_idx+1}.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    print(f"  SHAP plots saved to: {shap_dir}/")
+    return shap_dir
+
+
+def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_shap: bool = True):
     print(f"\n{'#'*60}")
     print(f"# TAWSEEM XGBoost — Scenario: {scenario_name.upper()}")
     print(f"{'#'*60}")
@@ -106,6 +235,8 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
         y_fold_train = y_train[trn_idx]
         y_fold_val   = y_train[val_idx]
         
+        # Bug fix 1: khởi tạo model mới mỗi fold (tránh NameError + state leak)
+        model = XGBClassifier(**XGB_PARAMS)
         model.fit(X_fold_train, y_fold_train)
         preds = model.predict(X_fold_val)
         acc = accuracy_score(y_fold_val, preds)
@@ -134,16 +265,18 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
 
     train_acc = accuracy_score(y_train, train_preds)
     test_acc  = accuracy_score(y_test,  test_preds)
+    eval_elapsed = time.time() - eval_start
 
     print(f"\n  Train (90%) Accuracy : {train_acc:.4f}")
     print(f"  Test  (10%) Accuracy : {test_acc:.4f}")
-    print(f"  Eval time            : {time.time() - eval_start:.1f}s")
+    print(f"  Eval time            : {eval_elapsed:.1f}s")
 
     class_names = [f"{i+1}-Person" for i in range(5)]
     print(f"\n  Classification Report (Test):")
     print(classification_report(y_test, test_preds, target_names=class_names, digits=4))
 
-    importances = model.feature_importances_
+    # Bug fix: dùng best_model thay vì model (model chỉ là fold cuối)
+    importances = best_model.feature_importances_
     top_idx = np.argsort(importances)[::-1][:15]
     print(f"  Top 15 Feature Importances:")
     for rank, idx in enumerate(top_idx, 1):
@@ -162,13 +295,24 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False):
     plt.close()
     print(f"\n  Confusion matrix saved: {cm_path}")
 
+    # ── SHAP Analysis ──────────────────────────────────────────────
+    if HAS_SHAP and run_shap:
+        run_shap_analysis(
+            model=best_model,
+            X_test=X_test_scaled,
+            y_test=y_test,
+            class_names=class_names,
+            scenario_name=scenario_name,
+            results_dir=RESULTS_DIR,
+        )
+
     return {
         "scenario": scenario_name,
         "cv_acc": cv_scores.mean(),
         "cv_std": cv_scores.std(),
         "train_acc": train_acc,
         "test_acc": test_acc,
-        "elapsed_time": elapsed,
+        "elapsed_time": cv_time + eval_elapsed,
     }
 
 
@@ -187,13 +331,21 @@ def main():
         "--skip-preprocessing", action="store_true",
         help="Bỏ qua tiền xử lý nếu CSV đã tồn tại trong data/processed/",
     )
+    parser.add_argument(
+        "--no-shap", action="store_true",
+        help="Tắt SHAP analysis (mặc định: bật nếu shap được cài)",
+    )
     args = parser.parse_args()
 
     scenarios = ["single", "three", "four", "four_union"] if args.scenario == "all" else [args.scenario]
 
     all_results = []
     for scenario in scenarios:
-        result = run_xgb_scenario(scenario, skip_preprocessing=args.skip_preprocessing)
+        result = run_xgb_scenario(
+            scenario,
+            skip_preprocessing=args.skip_preprocessing,
+            run_shap=not args.no_shap,
+        )
         all_results.append(result)
 
     if len(all_results) > 1:

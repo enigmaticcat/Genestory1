@@ -178,6 +178,36 @@ python3 src/train_xgb.py --scenario four_union --skip-preprocessing
 
 ---
 
+## Tái hiện Haned 2011 (MLE số contributors + Predictive Value)
+
+Script mới: `src/haned2011_reproduction.py`
+
+```bash
+# Chạy nhanh trên subset để kiểm tra pipeline
+python3 src/haned2011_reproduction.py \
+  --data-root "PROVEDIt_1-5-Person CSVs Filtered" \
+  --output-dir "results/haned2011_quick" \
+  --multiplex IDPlus28 \
+  --injection-times "10 sec" \
+  --max-files 3 \
+  --simulations 1000
+
+# Chạy đầy đủ (all files)
+python3 src/haned2011_reproduction.py \
+  --data-root "PROVEDIt_1-5-Person CSVs Filtered" \
+  --output-dir "results/haned2011_full" \
+  --simulations 5000
+```
+
+Kết quả chính sẽ được lưu trong thư mục output:
+- `summary.json`: accuracy và cấu hình chạy
+- `conditional_probs_mle.csv`: ước lượng `Pr(x_hat=i | x=k)` cho MLE
+- `conditional_probs_mac.csv`: baseline maximum allele count
+- `predictive_values.csv`: predictive value theo các prior (Expert 1/2/3 và empirical PROVEDIt)
+- `profile_predictions.csv`: dự đoán theo từng profile
+
+---
+
 ## Chạy pipeline đầy đủ (MLP + XGBoost + RF)
 
 ```bash
@@ -391,6 +421,52 @@ results/
 - CSV files: 5-50KB (metrics tables)
 - PNG plots: 200-800KB (high-resolution charts)  
 - Summary reports: 10-30KB (text analysis)
+
+---
+
+## Hướng dẫn Inference (Dự đoán NOC từ file dữ liệu mới)
+
+Phần này hướng dẫn các bước từ một file dữ liệu thô (`.txt` hoặc `.csv` xuất ra từ máy giải trình tự) đến khi có được kết quả án (giả định tập dữ liệu sử dụng Single Kit).
+
+### Bước 1: Chuẩn bị dữ liệu thô
+Nếu dữ liệu của bạn ở dạng `.txt` (tab-separated), trước tiên hãy chuyển file sang định dạng phân cách bởi dấu phẩy (`.csv`).
+File dữ liệu này cần chứa format với các cột cơ bản như `Sample File`, `Marker`, `Dye`, `Allele 1`, `Size 1`, `Height 1`, `Allele 2`, `Size 2`, `Height 2`...
+
+*Ví dụ file nguồn:* `data/processed/20251011_HID360.csv`
+
+### Bước 2: Chuyển đổi định dạng sang chuẩn cấu trúc PROVEDIt
+Pipeline sử dụng theo chuẩn định dạng cố định của dataset PROVEDIt (cố định số lượng phân mảnh trải dài từ `Allele 1` đến `Allele 100`). Chạy lệnh dưới đây để format lại file của bạn (Script sẽ trích xuất cột xen kẽ):
+
+```bash
+python3 src/convert_to_provedit.py \
+  --input data/processed/20251011_HID360.csv \
+  --output data/processed/20251011_HID360_PROVEDIt.csv
+```
+
+### Bước 3: Build lại Data Scaler (Chỉ chạy 1 lần duy nhất)
+Model yêu cầu dữ liệu normalize `MinMaxScaler` dựa theo tham số min/max thực tế của tập training dataset. Lệnh này sẽ tự động parse data file và xuất lại tham số scaler dưới dạng `single_scaler.pkl`:
+
+```bash
+python3 src/export_scaler.py
+```
+*(File scaler sẽ được tạo ở `data/processed/single_scaler.pkl`)*
+
+### Bước 4: Chạy dự đoán (Inference)
+Truyền file `.csv` Provedit (Bước 2), file scaler (Bước 3) và model đã train (`single_best_model.pth`) để tính toán NOC cho mỗi profile.
+
+```bash
+python3 src/infer.py \
+  --data data/processed/20251011_HID360_PROVEDIt.csv \
+  --model data/processed/single_best_model.pth \
+  --scaler data/processed/single_scaler.pkl \
+  --output data/processed/predictions.csv
+```
+
+### Bước 5: Xem kết quả đánh giá (Predictions)
+Kết quả sẽ được xuất vào file `data/processed/predictions.csv`. Bảng kết quả bao gồm:
+- `Sample File`
+- `Predicted NOC` (Kết quả phỏng đoán cuối cùng từ 1-5 người)
+- `Confidence (%)` và các cột tỉ lệ phần trăm cho từng Class NOC cụ thể
 
 ---
 
