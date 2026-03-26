@@ -55,8 +55,78 @@ XGB_PARAMS = dict(
 
 
 # ============================================================
-# SHAP Analysis
+# Feature Name Mapping
 # ============================================================
+# 17 per-marker features (in order from _extract_marker_features)
+_MARKER_FEAT_NAMES = [
+    "n_alleles",      # 0
+    "h1",             # 1
+    "h2",             # 2
+    "h3",             # 3
+    "sum_h",          # 4
+    "mean_h",         # 5
+    "std_h",          # 6
+    "h_ratio",        # 7
+    "h_range",        # 8
+    "n_ol",           # 9
+    "n_missing",      # 10
+    "stutter_ratio",  # 11
+    "snr_top2",       # 12
+    "log1p_h1",       # 13
+    "log1p_sum_h",    # 14
+    "missing_marker", # 15
+    "marker_index",   # 16
+]
+
+# 13 aggregate (profile-level) features
+_AGGREGATE_FEAT_NAMES = [
+    "Global_MAC",              # max allele count across markers
+    "Global_mean_allele_cnt",  # mean allele count
+    "Global_std_allele_cnt",   # std allele count
+    "Global_markers_3plus",    # markers with 3+ alleles
+    "Global_markers_5plus",    # markers with 5+ alleles
+    "Global_total_OL",         # total out-of-ladder peaks
+    "Global_mean_max_height",  # mean of per-marker max height
+    "Global_std_max_height",   # std of per-marker max height
+    "Global_total_peaks",      # sum of allele counts
+    "Global_total_height",     # sum of all heights
+    "Global_n_missing_markers",# number of padded/missing markers
+    "Global_multiplex_id",     # kit encoding
+    "Global_injection_time_id",# injection time encoding
+]
+
+
+def get_feature_names(scenario_name: str, n_features: int) -> list:
+    """
+    Tạo danh sách tên feature mô tả cho scenario đã cho.
+    Format: {MARKER}_{feature} cho per-marker features,
+            Global_{name} cho aggregate features.
+    Nếu n_features không khớp, fallback về F{i:03d}.
+    """
+    from src.config import SCENARIOS, MARKERS_TO_REMOVE
+
+    try:
+        markers = sorted(SCENARIOS[scenario_name]["markers_to_keep"])
+    except KeyError:
+        return [f"F{i:03d}" for i in range(n_features)]
+
+    n_per_marker = len(_MARKER_FEAT_NAMES)  # 17
+    n_markers    = len(markers)
+    expected_n   = n_markers * n_per_marker + len(_AGGREGATE_FEAT_NAMES)
+
+    if n_features != expected_n:
+        # The actual number doesn’t match — fall back to generic names
+        print(f"  [WARN] get_feature_names: expected {expected_n} features for "
+              f"scenario '{scenario_name}', got {n_features}. Using generic names.")
+        return [f"F{i:03d}" for i in range(n_features)]
+
+    names = []
+    for marker in markers:
+        for feat in _MARKER_FEAT_NAMES:
+            names.append(f"{marker}_{feat}")
+    names.extend(_AGGREGATE_FEAT_NAMES)
+    return names
+
 def run_shap_analysis(
     model,
     X_test: np.ndarray,
@@ -64,6 +134,7 @@ def run_shap_analysis(
     class_names: list,
     scenario_name: str,
     results_dir: str,
+    feature_names: list = None,
     max_display: int = 20,
     n_background: int = 100,
 ):
@@ -85,7 +156,9 @@ def run_shap_analysis(
 
     n_classes = len(class_names)
     n_features = X_test.shape[1]
-    feature_names = [f"F{i:03d}" for i in range(n_features)]
+    # Use descriptive names if provided, else fall back to generic
+    if feature_names is None or len(feature_names) != n_features:
+        feature_names = [f"F{i:03d}" for i in range(n_features)]
 
     # ── 1. Summary plot (beeswarm, per class) ───────────────────
     print("  [1/4] Summary beeswarm plots...")
@@ -206,6 +279,10 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_s
     print(f"  Train: {X_train_raw.shape[0]} profiles × {X_train_raw.shape[1]} features")
     print(f"  Test:  {X_test_raw.shape[0]} profiles × {X_test_raw.shape[1]} features")
 
+    # ── Feature names (descriptive) ────────────────────────────
+    feat_names = get_feature_names(scenario_name, X_train_raw.shape[1])
+    print(f"  Feature names: {feat_names[0]} ... {feat_names[-1]}")
+
     # Use X_train_raw (90%), y_train, groups_train for CV
     try:
         skf = StratifiedKFold(n_splits=NUM_CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
@@ -280,7 +357,8 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_s
     top_idx = np.argsort(importances)[::-1][:15]
     print(f"  Top 15 Feature Importances:")
     for rank, idx in enumerate(top_idx, 1):
-        print(f"    {rank:2d}. Feature {idx:4d}: {importances[idx]:.4f}")
+        fname = feat_names[idx] if idx < len(feat_names) else f"F{idx:03d}"
+        print(f"    {rank:2d}. {fname:<35s}: {importances[idx]:.4f}")
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -304,6 +382,7 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_s
             class_names=class_names,
             scenario_name=scenario_name,
             results_dir=RESULTS_DIR,
+            feature_names=feat_names,
         )
 
     return {
