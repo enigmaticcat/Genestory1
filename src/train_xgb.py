@@ -19,7 +19,12 @@ from sklearn.metrics import (
     accuracy_score, classification_report,
     confusion_matrix, ConfusionMatrixDisplay,
 )
+from sklearn.model_selection import (
+    StratifiedKFold, GroupKFold, cross_val_score,
+    GridSearchCV, RandomizedSearchCV,
+)
 import matplotlib.pyplot as plt
+import json
 
 try:
     from xgboost import XGBClassifier
@@ -249,7 +254,88 @@ def run_shap_analysis(
     return shap_dir
 
 
-def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_shap: bool = True):
+# ============================================================
+# Cấu hình Tuning (Grid / Randomized Search)
+# ============================================================
+TUNING_GRID_FAST = {
+    "n_estimators": [100, 300, 500, 800],
+    "max_depth": [3, 6, 9],
+    "learning_rate": [0.05, 0.1, 0.2],
+}
+
+TUNING_GRID_FULL = {
+    "n_estimators": [100, 300, 500, 800, 1200, 1500],
+    "max_depth": [3, 5, 7, 9, 12],
+    "learning_rate": [0.01, 0.05, 0.1, 0.2, 0.3],
+    "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
+    "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
+    "min_child_weight": [1, 3, 5, 7],
+    "gamma": [0, 0.1, 0.2, 0.5, 1, 2, 5],
+    "reg_alpha": [0, 0.01, 0.1, 1, 10],
+    "reg_lambda": [0.1, 1, 5, 10],
+}
+
+
+def run_tuning(X, y, groups, scenario_name: str, full_search: bool = False):
+    """
+    Thực hiện Hyperparameter Tuning cho XGBoost.
+    - full_search=False: Dùng GridSearchCV với bộ tham số FAST.
+    - full_search=True: Dùng RandomizedSearchCV với bộ tham số FULL.
+    """
+    print(f"\n[TUNING] Starting {'RANDOMIZED' if full_search else 'GRID'} Search for scenario '{scenario_name}'...")
+    
+    # Stratified K-Fold dựa trên groups (strata)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_SEED)
+    
+    base_model = XGBClassifier(
+        random_state=RANDOM_SEED,
+        eval_metric="mlogloss",
+        verbosity=0,
+        n_jobs=-1,
+    )
+    
+    if full_search:
+        search = RandomizedSearchCV(
+            estimator=base_model,
+            param_distributions=TUNING_GRID_FULL,
+            n_iter=50,  # Thử 50 tổ hợp ngẫu nhiên
+            scoring="accuracy",
+            cv=skf,
+            verbose=1,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+        )
+    else:
+        search = GridSearchCV(
+            estimator=base_model,
+            param_grid=TUNING_GRID_FAST,
+            scoring="accuracy",
+            cv=skf,
+            verbose=1,
+            n_jobs=-1,
+        )
+    
+    tune_start = time.time()
+    search.fit(X, y)
+    tune_time = time.time() - tune_start
+    
+    best_params = search.best_params_
+    print(f"\n[TUNING] Best Params found in {tune_time:.1f}s:")
+    for k, v in best_params.items():
+        print(f"  - {k:20s}: {v}")
+    print(f"  - Best Accuracy: {search.best_score_:.4f}")
+    
+    # Lưu kết quả
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    param_path = os.path.join(RESULTS_DIR, f"xgb_best_params_{scenario_name}.json")
+    with open(param_path, "w") as f:
+        json.dump(best_params, f, indent=4)
+    print(f"  - Saved to: {param_path}")
+    
+    return best_params
+
+
+def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_shap: bool = True, tuned_params: dict = None):
     print(f"\n{'#'*60}")
     print(f"# TAWSEEM XGBoost — Scenario: {scenario_name.upper()}")
     print(f"{'#'*60}")
@@ -312,8 +398,12 @@ def run_xgb_scenario(scenario_name: str, skip_preprocessing: bool = False, run_s
         y_fold_train = y_train[trn_idx]
         y_fold_val   = y_train[val_idx]
         
-        # Bug fix 1: khởi tạo model mới mỗi fold (tránh NameError + state leak)
-        model = XGBClassifier(**XGB_PARAMS)
+        # Merge default params with tuned params if any
+        fold_params = XGB_PARAMS.copy()
+        if tuned_params:
+            fold_params.update(tuned_params)
+        
+        model = XGBClassifier(**fold_params)
         model.fit(X_fold_train, y_fold_train)
         preds = model.predict(X_fold_val)
         acc = accuracy_score(y_fold_val, preds)
@@ -414,16 +504,50 @@ def main():
         "--no-shap", action="store_true",
         help="Tắt SHAP analysis (mặc định: bật nếu shap được cài)",
     )
+    parser.add_argument(
+        "--tune", action="store_true",
+        help="Chạy nhanh GridSearchCV (n_estimators, max_depth, learning_rate)",
+    )
+    parser.add_argument(
+        "--tune-full", action="store_true",
+        help="Chạy RandomizedSearchCV toàn bộ tham số (n_iter=50)",
+    )
     args = parser.parse_args()
 
     scenarios = ["single", "three", "four", "four_union"] if args.scenario == "all" else [args.scenario]
 
     all_results = []
     for scenario in scenarios:
+        # ── Preprocessing if needed for tuning ──────────────────
+        processed_path = os.path.join(DATA_PROCESSED_DIR, f"{scenario}_processed.csv")
+        if args.skip_preprocessing and os.path.exists(processed_path):
+            df = pd.read_csv(processed_path)
+        else:
+            df = preprocess_scenario(scenario)
+
+        # ── Tuning ───────────────────────────────────────────────
+        tuned_params = None
+        if args.tune or args.tune_full:
+            # Prepare data for tuning
+            train_dataset, _, _, _, _, group_data, _ = prepare_profile_datasets(
+                df, train_ratio=TRAIN_RATIO, random_seed=RANDOM_SEED
+            )
+            X_tune = train_dataset.features.numpy()
+            y_tune = train_dataset.labels.numpy()
+            strata_tune = group_data[0]
+            
+            tuned_params = run_tuning(
+                X_tune, y_tune, strata_tune,
+                scenario_name=scenario,
+                full_search=args.tune_full
+            )
+
+        # ── Main Training ────────────────────────────────────────
         result = run_xgb_scenario(
             scenario,
-            skip_preprocessing=args.skip_preprocessing,
+            skip_preprocessing=True, # Đã chạy ở trên hoặc loop
             run_shap=not args.no_shap,
+            tuned_params=tuned_params
         )
         all_results.append(result)
 
