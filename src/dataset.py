@@ -206,38 +206,6 @@ def prepare_profile_datasets(df, train_ratio=0.9, random_seed=42):
         print(f"  Removed {len(mpp) - len(valid)} profiles with inconsistent markers")
         df_sorted = df_sorted[df_sorted[profile_col].isin(valid)].reset_index(drop=True)
 
-    # --- NEW: BALANCING Class 1 BEFORE feature extraction ---
-    unique_profiles = df_sorted.drop_duplicates(profile_col)[[profile_col, 'NOC']]
-    if 'injection_time' in df_sorted.columns:
-        unique_profiles['injection_time'] = df_sorted.groupby(profile_col)['injection_time'].transform('first')
-    
-    noc_counts = unique_profiles['NOC'].value_counts()
-    
-    # Target: average of other classes (NOC 2-5)
-    others = noc_counts[noc_counts.index > 1]
-    target_n = int(others.mean()) if not others.empty else 1200
-    
-    if noc_counts.get(1, 0) > target_n:
-        print(f"  Downsampling NOC=1 from {int(noc_counts[1])} to {target_n} profiles...")
-        noc1_df = unique_profiles[unique_profiles['NOC'] == 1]
-        
-        # Stratified sample if injection_time available
-        if 'injection_time' in noc1_df.columns:
-            selected_noc1 = noc1_df.groupby('injection_time', group_keys=False).apply(
-                lambda x: x.sample(n=min(len(x), int(target_n / noc1_df['injection_time'].nunique())), 
-                                 random_state=random_seed)
-            ).index
-        else:
-            selected_noc1 = noc1_df.sample(n=target_n, random_state=random_seed).index
-            
-        remaining_profiles = unique_profiles[unique_profiles['NOC'] > 1].index
-        balanced_indices = remaining_profiles.union(selected_noc1)
-        balanced_sample_files = unique_profiles.loc[balanced_indices, profile_col].values
-        
-        df_sorted = df_sorted[df_sorted[profile_col].isin(balanced_sample_files)].reset_index(drop=True)
-        print(f"  Balanced dataset: {df_sorted[profile_col].nunique()} profiles")
-    # --------------------------------------------------------
-    
     # Column groups
     height_cols = [f'Height {i}' for i in range(1, 11) if f'Height {i}' in df.columns]
     ol_cols = [f'OL_ind_{i}' for i in range(1, 11) if f'OL_ind_{i}' in df.columns]
@@ -312,84 +280,90 @@ def prepare_profile_datasets(df, train_ratio=0.9, random_seed=42):
     
     profile_meta['strata'] = profile_meta[strata_cols].astype(str).agg('_'.join, axis=1)
 
-    # --- 2. Dynamic Downsampling on FULL dataset (Class 1 cap = 5x mean of Class 2-5) ---
-    counts = profile_meta['NOC'].value_counts()
-    other_counts = [counts.get(n, 0) for n in [2, 3, 4, 5]]
-    mean_other = sum(other_counts) / 4.0 if sum(other_counts) > 0 else 0
-    max_class1 = max(1, int(mean_other * 5))
-    
-    idx_class1 = profile_meta[profile_meta['NOC'] == 1].index.tolist()
-    idx_others = profile_meta[profile_meta['NOC'] != 1].index.tolist()
-    
-    if len(idx_class1) > max_class1:
-        keep_class1 = []
-        c1_strata = profile_meta.loc[idx_class1, 'strata'].value_counts(normalize=True)
-        for sv, prop in c1_strata.items():
-            target_n = int(round(prop * max_class1))
-            sv_idx = profile_meta[(profile_meta['NOC'] == 1) & (profile_meta['strata'] == sv)].index.tolist()
-            np.random.shuffle(sv_idx)
-            keep_class1.extend(sv_idx[:target_n])
-            
-        if len(keep_class1) > max_class1:
-            np.random.shuffle(keep_class1)
-            keep_class1 = keep_class1[:max_class1]
-        elif len(keep_class1) < max_class1:
-            rem = list(set(idx_class1) - set(keep_class1))
-            np.random.shuffle(rem)
-            keep_class1.extend(rem[:max_class1 - len(keep_class1)])
-            
-        balanced_idx = keep_class1 + idx_others
-    else:
-        balanced_idx = profile_meta.index.tolist()
-        
-    np.random.shuffle(balanced_idx)
-    balanced_idx = np.array(balanced_idx)
-    
-    # Complete filtered Base Dataset
-    X_flat_b = X_flat[balanced_idx]
-    y_b = y[balanced_idx]
-    groups_b = profile_meta['strata'].values[balanced_idx]
-    X_matrix_b = X_matrix[balanced_idx]
-    
-    print(f"\n[Dataset] After balancing class 1 on FULL dataset:")
-    print(f"  Total balanced profiles: {len(balanced_idx)}")
-    
-    # --- 3. Stratified Split 80/20 on the BALANCED dataset ---
-    balanced_meta = profile_meta.iloc[balanced_idx].copy().reset_index(drop=True)
-    
-    train_idx_rel, test_idx_rel = [], []
-    for sv in sorted(balanced_meta['strata'].unique()):
-        idx = balanced_meta[balanced_meta['strata'] == sv].index.tolist()
+    # --- 2. Stratified Split on FULL dataset (preserve original distribution in test) ---
+    train_idx_full, test_idx_full = [], []
+    for sv in sorted(profile_meta['strata'].unique()):
+        idx = profile_meta[profile_meta['strata'] == sv].index.tolist()
         np.random.shuffle(idx)
         n_train = int(len(idx) * train_ratio)
-        train_idx_rel.extend(idx[:n_train])
-        test_idx_rel.extend(idx[n_train:])
-        
-    np.random.shuffle(train_idx_rel)
-    np.random.shuffle(test_idx_rel)
+        train_idx_full.extend(idx[:n_train])
+        test_idx_full.extend(idx[n_train:])
 
-    X_train_flat, y_train = X_flat_b[train_idx_rel], y_b[train_idx_rel]
-    X_test_flat, y_test = X_flat_b[test_idx_rel], y_b[test_idx_rel]
-    X_train_2d, X_test_2d = X_matrix_b[train_idx_rel], X_matrix_b[test_idx_rel]
-    
-    train_profile_ids = np.arange(len(train_idx_rel))
-    
+    train_idx_full = np.array(train_idx_full)
+    test_idx_full = np.array(test_idx_full)
+    np.random.shuffle(train_idx_full)
+    np.random.shuffle(test_idx_full)
+
+    print(f"\n[Dataset] Stratified split (original distribution preserved in test):")
+    print(f"  Train (before balancing): {len(train_idx_full)}, Test: {len(test_idx_full)}")
+
+    # --- 3. Undersample Class 1 ONLY on train set ---
+    train_meta = profile_meta.iloc[train_idx_full].reset_index(drop=True)
+
+    train_counts = train_meta['NOC'].value_counts()
+    other_counts = [train_counts.get(n, 0) for n in [2, 3, 4, 5]]
+    mean_other = sum(other_counts) / 4.0 if sum(other_counts) > 0 else 0
+    max_class1 = max(1, int(mean_other * 5))
+
+    idx_class1_local = train_meta[train_meta['NOC'] == 1].index.tolist()
+    idx_others_local = train_meta[train_meta['NOC'] != 1].index.tolist()
+
+    if len(idx_class1_local) > max_class1:
+        keep_class1_local = []
+        c1_strata = train_meta.loc[idx_class1_local, 'strata'].value_counts(normalize=True)
+        for sv, prop in c1_strata.items():
+            target_n = int(round(prop * max_class1))
+            sv_idx = train_meta[(train_meta['NOC'] == 1) & (train_meta['strata'] == sv)].index.tolist()
+            np.random.shuffle(sv_idx)
+            keep_class1_local.extend(sv_idx[:target_n])
+
+        if len(keep_class1_local) > max_class1:
+            np.random.shuffle(keep_class1_local)
+            keep_class1_local = keep_class1_local[:max_class1]
+        elif len(keep_class1_local) < max_class1:
+            rem = list(set(idx_class1_local) - set(keep_class1_local))
+            np.random.shuffle(rem)
+            keep_class1_local.extend(rem[:max_class1 - len(keep_class1_local)])
+
+        balanced_train_local = np.array(keep_class1_local + idx_others_local)
+    else:
+        balanced_train_local = np.arange(len(train_idx_full))
+
+    np.random.shuffle(balanced_train_local)
+    train_idx_balanced = train_idx_full[balanced_train_local]
+
+    # Build final arrays
+    X_train_flat, y_train = X_flat[train_idx_balanced], y[train_idx_balanced]
+    X_test_flat,  y_test  = X_flat[test_idx_full],     y[test_idx_full]
+    X_train_2d = X_matrix[train_idx_balanced]
+    X_test_2d  = X_matrix[test_idx_full]
+
+    groups_train = profile_meta['strata'].values[train_idx_balanced]
+    groups_test  = profile_meta['strata'].values[test_idx_full]
+
+    # full_data = balanced train data only (used for CV — no test leakage)
+    X_flat_b   = X_train_flat
+    y_b        = y_train
+    groups_b   = groups_train
+    X_matrix_b = X_train_2d
+
+    train_profile_ids = np.arange(len(train_idx_balanced))
+
     # Flat datasets
     train_dataset = DNAProfileDataset(X_train_flat, y_train, fit_scaler=True)
-    test_dataset = DNAProfileDataset(X_test_flat, y_test, scaler=train_dataset.scaler, fit_scaler=False)
-    
-    # Class weights for imbalanced data (by NOC only, not injection_time)
+    test_dataset  = DNAProfileDataset(X_test_flat,  y_test,  scaler=train_dataset.scaler, fit_scaler=False)
+
+    # Class weights computed from balanced train set only
     from collections import Counter
     counts = Counter(y_train.tolist())
     total = len(y_train)
     n_classes = len(counts)
     class_weights = {c: total / (n_classes * n) for c, n in counts.items()}
-    
-    groups_train = groups_b[train_idx_rel]
-    groups_test  = groups_b[test_idx_rel]
 
-    print(f"  Train: {len(train_idx_rel)}, Test: {len(test_idx_rel)}")
-    print(f"  Class distribution train: {dict(sorted(counts.items()))}")
+    print(f"  Train (after undersampling): {len(train_idx_balanced)}")
+    print(f"  Class distribution train: {dict(sorted(Counter(y_train.tolist()).items()))}")
+    test_dist = dict(sorted(Counter(y_test.tolist()).items()))
+    print(f"  Class distribution test (original): {test_dist}")
     
     return train_dataset, test_dataset, train_dataset.scaler, train_profile_ids, \
            (X_train_2d, X_test_2d, y_train, y_test, class_weights), \
